@@ -1,0 +1,13 @@
+# Don't send local build artefacts / VCS into the Docker context.
+# The Linux .so must be built inside the image, so we explicitly exclude
+# any host-side target/ directory.
+.git
+.github
+.vscode
+target
+**/target
+rust/gitea-client/target
+
+# Misc
+.DS_Store
+*.log

@@ -1,0 +1,26 @@
+target/
+work*/
+
+# IntelliJ project files 
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# eclipse project file
+.settings
+.classpath
+.project
+build/
+
+# vscode
+bin/
+/.factorypath
+
+/nb-configuration.xml
+
+# Rust build artifacts
+rust/**/target/
+*.so
+*.dylib
+*.dll

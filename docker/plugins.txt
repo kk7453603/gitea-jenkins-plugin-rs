@@ -1,0 +1,11 @@
+workflow-multibranch:latest
+branch-api:latest
+workflow-aggregator:latest
+git:latest
+credentials-binding:latest
+configuration-as-code:latest
+# Direct dependencies of the custom Gitea plugin (declared in pom.xml).
+# jenkins-plugin-cli does not see them as transitive deps of our pinned .jpi,
+# so list them explicitly.
+authentication-tokens:latest
+handy-uri-templates-2-api:latest

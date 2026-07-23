@@ -1,0 +1,59 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core"
+         xmlns:f="/lib/form">
+  <f:section title="${%Gitea Servers}">
+    <f:entry>
+      <f:repeatableHeteroProperty field="servers" honorOrder="true" hasHeader="true">
+        <f:entry title="">
+          <div align="right">
+            <f:repeatableDeleteButton/>
+          </div>
+        </f:entry>
+      </f:repeatableHeteroProperty>
+    </f:entry>
+  </f:section>
+  <f:section title="${%Webhook Server}">
+    <f:entry title="${%Listen port}" field="webhookPort">
+      <f:number default="8081" clazz="positive-number"/>
+    </f:entry>
+    <f:entry title="${%HMAC secret (optional)}" field="webhookSecret">
+      <f:password/>
+    </f:entry>
+    <f:advanced>
+      <f:entry title="${%Bearer token (optional)}" field="webhookBearerToken">
+        <f:password/>
+      </f:entry>
+      <f:entry title="${%Allowed CIDRs (comma-separated)}" field="webhookAllowedCidrs">
+        <f:textbox placeholder="0.0.0.0/0,::/0"/>
+      </f:entry>
+      <f:entry title="${%Rate limit (requests per minute per IP)}" field="webhookRateLimitPerMinute">
+        <f:number default="60" clazz="positive-number"/>
+      </f:entry>
+      <f:entry title="${%Trusted certificates (PEM)}" field="trustedCertificatesPem">
+        <f:textarea/>
+      </f:entry>
+    </f:advanced>
+  </f:section>
+  <f:section title="${%Polling}">
+    <f:entry title="${%Polling interval (seconds)}" field="pollingIntervalSeconds"
+             help="">
+      <f:number default="0" clazz="non-negative-number"/>
+    </f:entry>
+  </f:section>
+  <f:section title="${%HTTP Proxy}">
+    <f:advanced>
+      <f:entry title="${%Proxy URL}" field="proxyUrl">
+        <f:textbox placeholder="http://proxy.corp.com:3128"/>
+      </f:entry>
+      <f:entry title="${%Proxy username (optional)}" field="proxyUsername">
+        <f:textbox/>
+      </f:entry>
+      <f:entry title="${%Proxy password}" field="proxyPassword">
+        <f:password/>
+      </f:entry>
+      <f:entry title="${%No-proxy hosts}" field="noProxyHosts">
+        <f:textbox placeholder="localhost,127.0.0.1,.internal.corp.com"/>
+      </f:entry>
+    </f:advanced>
+  </f:section>
+</j:jelly>
