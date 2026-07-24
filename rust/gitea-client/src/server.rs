@@ -27,14 +27,17 @@ use axum::{
     body::Bytes,
     extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
-    routing::post,
+    response::IntoResponse,
+    routing::{get, post},
     Router,
 };
 use cidr::IpCidr;
 use hmac::{Hmac, Mac};
+use lru::LruCache;
+use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
 use sha2::Sha256;
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -47,6 +50,61 @@ pub const HEADER_EVENT: &str = "x-gitea-event";
 
 /// Header name carrying the hex-encoded HMAC-SHA256 of the request body.
 pub const HEADER_SIGNATURE: &str = "x-gitea-signature";
+
+/// Header name carrying the unique delivery UUID for a webhook (issue #11).
+/// Gitea populates this on every webhook delivery and reuses it across
+/// retries, so deduplicating on this header is sufficient to make the
+/// webhook receiver idempotent.
+pub const HEADER_DELIVERY: &str = "x-gitea-delivery";
+
+// ---------------------------------------------------------------------------
+// Prometheus metrics (issue #10).
+//
+// `LazyLock` defers the `register_*` calls until first use so the static
+// registry stays clean in tests that don't touch the webhook server.
+// ---------------------------------------------------------------------------
+
+/// Total webhook requests, partitioned by event type and outcome label
+/// (`ok`, `bad_request`, `unauthorized`, `rate_limited`, `forbidden`,
+/// `duplicate`, `error`).
+pub static WEBHOOK_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "gitea_webhook_requests_total",
+        "Total webhook requests received by the Rust webhook server",
+        &["event_type", "status"]
+    )
+    .expect("failed to register gitea_webhook_requests_total")
+});
+
+/// JNI callback latency in seconds, partitioned by event type. Covers only
+/// the time spent inside [`invoke_callback`] — the upstream IP/HMAC/rate
+/// checks are not included because they are dominated by cheap in-memory
+/// operations.
+pub static CALLBACK_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
+        "gitea_webhook_callback_latency_seconds",
+        "JNI callback latency in seconds",
+        &["event_type"],
+        vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]
+    )
+    .expect("failed to register gitea_webhook_callback_latency_seconds")
+});
+
+// ---------------------------------------------------------------------------
+// Idempotency cache (issue #11).
+//
+// Bounded at 2048 entries — enough to absorb Gitea's default 5-retry burst
+// (5-min jitter) for any realistic number of repositories, while keeping
+// memory growth bounded. The LRU eviction policy is the right fit here
+// because a delivery ID is "hot" only for the brief window between the
+// original delivery and its retries.
+// ---------------------------------------------------------------------------
+
+/// Bounded LRU of recently-seen `X-Gitea-Delivery` values. Presence in the
+/// cache ⇒ a prior delivery already triggered the Java callback, so a
+/// retry must be a no-op.
+static DELIVERY_CACHE: LazyLock<Mutex<LruCache<String, ()>>> =
+    LazyLock::new(|| Mutex::new(LruCache::new(std::num::NonZeroUsize::new(2048).expect("2048 > 0"))));
 
 /// Static callback hook used by the HTTP handler to invoke Java. In
 /// production this is `Some(real_jni_callback)`; in tests it is `None`
@@ -91,6 +149,43 @@ fn invoke_callback(event_type: &str, payload: &str) -> Result<(), String> {
     }
 }
 
+/// `GET /gitea-webhook/health` — Kubernetes liveness/readiness probe
+/// (issue #9).
+///
+/// Returns `200 {"status":"ok"}` unconditionally. No auth, no state, no
+/// side-effects — the kubelet calls this on a tight cadence and must not
+/// burn rate-limit tokens or trigger any logging.
+async fn health() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/json")],
+        r#"{"status":"ok"}"#,
+    )
+}
+
+/// `GET /gitea-webhook/metrics` — Prometheus text-format scrape target
+/// (issue #10).
+///
+/// Encodes every metric family registered against the default registry.
+/// The body is `text/plain; version=0.0.4` per the Prometheus exposition
+/// format spec.
+async fn metrics() -> impl IntoResponse {
+    let encoder = prometheus::TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let body = match encoder.encode_to_string(&metric_families) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to encode prometheus metrics");
+            String::new()
+        }
+    };
+    (
+        StatusCode::OK,
+        [("Content-Type", "text/plain; version=0.0.4")],
+        body,
+    )
+}
+
 /// Process-wide reference to the *most recently started* server's rate
 /// limiter. Used by [`cleanup_loop`] to evict stale buckets.
 ///
@@ -113,10 +208,11 @@ fn register_rate_limiter_for_cleanup(limiter: Arc<RateLimiter>) {
 }
 
 /// Background cleanup loop. Sweeps the registered rate limiter's bucket
-/// map every 5 minutes, evicting buckets idle for more than 10 minutes.
-/// Terminates when the tokio runtime tears it down — there is no explicit
-/// shutdown channel because the existing `WebhookServer::shutdown` drops
-/// the `shutdown_tx` half which fires `axum::serve`'s graceful shutdown,
+/// map every 5 minutes, evicting buckets idle for more than 10 minutes,
+/// and also runs the connection-pool TTL sweep (issue #8). Terminates
+/// when the tokio runtime tears it down — there is no explicit shutdown
+/// channel because the existing `WebhookServer::shutdown` drops the
+/// `shutdown_tx` half which fires `axum::serve`'s graceful shutdown,
 /// and the runtime aborts this spawned task at the same time.
 async fn cleanup_loop() {
     let mut interval = tokio::time::interval(Duration::from_secs(300));
@@ -126,6 +222,10 @@ async fn cleanup_loop() {
         if let Some(limiter) = CLEANUP_LIMITER.get() {
             limiter.cleanup_stale(Duration::from_secs(600));
         }
+        // Sweep idle entries out of the connection pool (issue #8). Safe
+        // to call unconditionally — `evict_stale` no-ops if the pool has
+        // never been initialised.
+        crate::pool::evict_stale();
     }
 }
 
@@ -244,6 +344,17 @@ impl WebhookServer {
             // accept either spelling.
             .route("/gitea-webhook/post", post(handle_webhook))
             .route("/gitea-webhook/post/", post(handle_webhook))
+            // Kubernetes liveness/readiness probe target (issue #9).
+            // Responds 200 `{"status":"ok"}` without any auth — the kubelet
+            // does not (and should not) carry an HMAC secret.
+            .route("/gitea-webhook/health", get(health))
+            .route("/gitea-webhook/health/", get(health))
+            // Prometheus scrape target (issue #10). Exposed without auth
+            // so the scraper does not need a per-namespace token; the
+            // metrics carry no sensitive payload (no repo names, no
+            // secrets, just counters + histogram buckets).
+            .route("/gitea-webhook/metrics", get(metrics))
+            .route("/gitea-webhook/metrics/", get(metrics))
             .with_state(state);
 
         let addr: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse().expect(
@@ -313,7 +424,7 @@ impl WebhookServer {
 
 /// axum handler for `POST /gitea-webhook/post`.
 ///
-/// Pipeline (stage 16):
+/// Pipeline (stage 16 + issue #10/#11 enhancements):
 /// 1. **IP allowlist** — if `WebhookState::allowed_cidrs` is non-empty,
 ///    the request is rejected with `403 FORBIDDEN` unless the remote IP
 ///    falls into one of the listed CIDRs.
@@ -325,7 +436,12 @@ impl WebhookServer {
 ///    set, the `Authorization: Bearer <token>` header must match.
 ///    Otherwise `401 UNAUTHORIZED`.
 /// 4. **HMAC verification** (stage 9.A) — the original security layer.
-/// 5. Dispatch to the Java callback.
+/// 5. **Idempotency** (issue #11) — `X-Gitea-Delivery` is checked against
+///    a bounded LRU cache. A second delivery with the same ID short-
+///    circuits with `200 OK` without invoking the Java callback, so Gitea
+///    retries do not produce duplicate `SCMEvent`s in Jenkins.
+/// 6. Dispatch to the Java callback, recording Prometheus metrics for
+///    total requests and JNI callback latency (issue #10).
 async fn handle_webhook(
     State(state): State<WebhookState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -334,11 +450,23 @@ async fn handle_webhook(
 ) -> StatusCode {
     let client_ip = addr.ip();
 
+    // We need an `event_type` label for the Prometheus counters. The
+    // event header is read *after* the security layers, so for early
+    // rejections (allowlist / rate-limit / bearer / HMAC) we fall back
+    // to the literal `"unknown"` label rather than leaking any header
+    // value that a malicious client might have set.
+    fn record(event_type: &str, status: &str) {
+        WEBHOOK_REQUESTS
+            .with_label_values(&[event_type, status])
+            .inc();
+    }
+
     // 1. IP allowlist (CIDR matching). Empty list ⇒ allow all.
     if !state.allowed_cidrs.is_empty() {
         let allowed = state.allowed_cidrs.iter().any(|cidr| cidr.contains(&client_ip));
         if !allowed {
             tracing::warn!(ip = %client_ip, "webhook rejected: IP not in allowlist");
+            record("unknown", "forbidden");
             return StatusCode::FORBIDDEN;
         }
     }
@@ -348,6 +476,7 @@ async fn handle_webhook(
     //    bucket (the lookup never happens for them).
     if !state.rate_limiter.check(client_ip) {
         tracing::warn!(ip = %client_ip, "webhook rejected: rate limited");
+        record("unknown", "rate_limited");
         return StatusCode::TOO_MANY_REQUESTS;
     }
 
@@ -366,6 +495,7 @@ async fn handle_webhook(
         let provided = auth.strip_prefix("Bearer ").unwrap_or("");
         if provided != expected.as_str() {
             tracing::warn!(ip = %client_ip, "webhook rejected: invalid bearer token");
+            record("unknown", "unauthorized");
             return StatusCode::UNAUTHORIZED;
         }
     }
@@ -379,16 +509,19 @@ async fn handle_webhook(
                     tracing::warn!(
                         "X-Gitea-Signature header is not valid UTF-8 — rejecting"
                     );
+                    record("unknown", "bad_request");
                     return StatusCode::BAD_REQUEST;
                 }
             },
             None => {
                 tracing::warn!("request missing X-Gitea-Signature header — rejecting");
+                record("unknown", "unauthorized");
                 return StatusCode::UNAUTHORIZED;
             }
         };
         if !verify_hmac(secret, &body, sig_header) {
             tracing::warn!("HMAC verification failed — rejecting webhook");
+            record("unknown", "unauthorized");
             return StatusCode::UNAUTHORIZED;
         }
     }
@@ -397,10 +530,14 @@ async fn handle_webhook(
     let event_header = match headers.get(HEADER_EVENT) {
         Some(v) => match v.to_str() {
             Ok(s) => s,
-            Err(_) => return StatusCode::BAD_REQUEST,
+            Err(_) => {
+                record("unknown", "bad_request");
+                return StatusCode::BAD_REQUEST;
+            }
         },
         None => {
             tracing::warn!("request missing X-Gitea-Event header — rejecting");
+            record("unknown", "bad_request");
             return StatusCode::BAD_REQUEST;
         }
     };
@@ -412,21 +549,61 @@ async fn handle_webhook(
         Ok(s) => s.to_string(),
         Err(_) => {
             tracing::warn!("request body is not valid UTF-8 — rejecting");
+            record(&event_type, "bad_request");
             return StatusCode::BAD_REQUEST;
         }
     };
 
-    // 7. Invoke Java callback.
-    if let Err(e) = invoke_callback(&event_type, &payload_str) {
+    // 7. Idempotency check (issue #11). `X-Gitea-Delivery` carries a UUID
+    //    that Gitea reuses across its retries of the same webhook. If we
+    //    have already dispatched this delivery to Java, short-circuit
+    //    with 200 OK — the upstream Gitea server treats 2xx as success
+    //    and stops retrying.
+    //
+    //    An empty / missing delivery header skips dedup (we cannot invent
+    //    a key) and falls back to the always-dispatch path, preserving
+    //    backwards compatibility with clients that don't send the header.
+    let delivery_id = headers
+        .get(HEADER_DELIVERY)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+    if let Some(id) = &delivery_id {
+        if !id.is_empty() {
+            let mut cache = match DELIVERY_CACHE.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(), // poisoned: keep serving
+            };
+            if cache.get(id).is_some() {
+                tracing::info!(delivery_id = %id, "duplicate webhook delivery, skipping");
+                record(&event_type, "duplicate");
+                return StatusCode::OK;
+            }
+            cache.put(id.clone(), ());
+        }
+    }
+
+    // 8. Invoke Java callback, recording latency into the Prometheus
+    //    histogram. The timer covers only the JNI round-trip — the
+    //    Java-side `handleEvent` is responsible for the bulk of the
+    //    latency, which is exactly what we want to track.
+    let timer = std::time::Instant::now();
+    let callback_result = invoke_callback(&event_type, &payload_str);
+    CALLBACK_LATENCY
+        .with_label_values(&[&event_type])
+        .observe(timer.elapsed().as_secs_f64());
+
+    if let Err(e) = callback_result {
         tracing::error!(
             event = %event_type,
             error = %e,
             "Java callback failed"
         );
+        record(&event_type, "error");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
     tracing::debug!(event = %event_type, bytes = body.len(), "webhook forwarded to Java");
+    record(&event_type, "ok");
     StatusCode::OK
 }
 
@@ -840,5 +1017,234 @@ mod tests {
         server.shutdown().await;
         // Calling again must not panic.
         server.shutdown().await;
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #9 — health endpoint.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn health_endpoint_returns_ok_without_auth() {
+        // The health probe must respond 200 even when HMAC is configured,
+        // because the Kubernetes kubelet has no way to produce a valid
+        // signature.
+        let mut server = WebhookServer::start(0, Some("topsecret".to_string()), None, vec![], 60)
+            .await
+            .expect("failed to bind test server");
+        let addr = server.local_addr();
+        let url = format!("http://{}/gitea-webhook/health", addr);
+
+        let client = reqwest::Client::new();
+        let resp = client.get(&url).send().await.expect("request failed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.text().await.expect("body");
+        assert!(body.contains(r#""status":"ok""#));
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_accepts_trailing_slash() {
+        // Match the post/ behaviour: register both spellings.
+        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+            .await
+            .expect("failed to bind test server");
+        let addr = server.local_addr();
+        let url = format!("http://{}/gitea-webhook/health/", addr);
+
+        let client = reqwest::Client::new();
+        let resp = client.get(&url).send().await.expect("request failed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        server.shutdown().await;
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #10 — metrics endpoint.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn metrics_endpoint_exposes_prometheus_text() {
+        install_test_callback();
+
+        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+            .await
+            .expect("failed to bind test server");
+        let addr = server.local_addr();
+
+        // Fire one webhook so the counters are non-zero.
+        let post_url = format!("http://{}/gitea-webhook/post", addr);
+        let m = marker("metrics_endpoint_exposes_prometheus_text");
+        let body = format!(r#"{{"ref":"refs/heads/main","_test":"{}"}}"#, m);
+        let client = reqwest::Client::new();
+        let _ = client
+            .post(&post_url)
+            .header("X-Gitea-Event", "push")
+            .body(body)
+            .send()
+            .await
+            .expect("webhook post failed");
+
+        // Scrape /metrics and confirm our counters appear.
+        let metrics_url = format!("http://{}/gitea-webhook/metrics", addr);
+        let resp = client
+            .get(&metrics_url)
+            .send()
+            .await
+            .expect("metrics request failed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            ct.starts_with("text/plain"),
+            "metrics content-type must be text/plain, got {ct}"
+        );
+        let body = resp.text().await.expect("metrics body");
+        assert!(
+            body.contains("gitea_webhook_requests_total"),
+            "metrics body missing gitea_webhook_requests_total:\n{body}"
+        );
+        assert!(
+            body.contains("gitea_webhook_callback_latency_seconds"),
+            "metrics body missing gitea_webhook_callback_latency_seconds:\n{body}"
+        );
+        server.shutdown().await;
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #11 — idempotency dedup via X-Gitea-Delivery.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn duplicate_delivery_is_skipped() {
+        install_test_callback();
+        let m = marker("duplicate_delivery_is_skipped");
+
+        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+            .await
+            .expect("failed to bind test server");
+        let addr = server.local_addr();
+        let url = format!("http://{}/gitea-webhook/post", addr);
+
+        // Same delivery ID for both requests — Gitea would emit the same
+        // UUID when retrying.
+        let delivery = "11111111-1111-1111-1111-111111111111";
+        let body = format!(r#"{{"ref":"refs/heads/main","_test":"{}"}}"#, m);
+
+        let client = reqwest::Client::new();
+        let resp1 = client
+            .post(&url)
+            .header("X-Gitea-Event", "push")
+            .header("X-Gitea-Delivery", delivery)
+            .body(body.clone())
+            .send()
+            .await
+            .expect("first request failed");
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        let resp2 = client
+            .post(&url)
+            .header("X-Gitea-Event", "push")
+            .header("X-Gitea-Delivery", delivery)
+            .body(body.clone())
+            .send()
+            .await
+            .expect("second request failed");
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        server.shutdown().await;
+
+        // The callback must have been invoked exactly once despite two
+        // deliveries with the same UUID.
+        let count = count_recorded_with(&m);
+        assert_eq!(
+            count, 1,
+            "duplicate delivery must not trigger a second callback — got {count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_deliveries_are_both_dispatched() {
+        // Sanity: dedup must NOT collapse two genuinely distinct deliveries.
+        install_test_callback();
+        let m1 = marker("distinct_deliveries_first");
+        let m2 = marker("distinct_deliveries_second");
+
+        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+            .await
+            .expect("failed to bind test server");
+        let addr = server.local_addr();
+        let url = format!("http://{}/gitea-webhook/post", addr);
+
+        let client = reqwest::Client::new();
+        let body1 = format!(r#"{{"ref":"refs/heads/main","_test":"{}"}}"#, m1);
+        let body2 = format!(r#"{{"ref":"refs/heads/main","_test":"{}"}}"#, m2);
+
+        let r1 = client
+            .post(&url)
+            .header("X-Gitea-Event", "push")
+            .header("X-Gitea-Delivery", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            .body(body1)
+            .send()
+            .await
+            .expect("first request failed");
+        assert_eq!(r1.status(), StatusCode::OK);
+
+        let r2 = client
+            .post(&url)
+            .header("X-Gitea-Event", "push")
+            .header("X-Gitea-Delivery", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+            .body(body2)
+            .send()
+            .await
+            .expect("second request failed");
+        assert_eq!(r2.status(), StatusCode::OK);
+
+        server.shutdown().await;
+
+        assert_eq!(
+            count_recorded_with(&m1),
+            1,
+            "first distinct delivery must be dispatched"
+        );
+        assert_eq!(
+            count_recorded_with(&m2),
+            1,
+            "second distinct delivery must be dispatched"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_delivery_header_still_dispatches() {
+        // Backwards-compat: clients that omit X-Gitea-Delivery fall
+        // through to the always-dispatch path.
+        install_test_callback();
+        let m = marker("missing_delivery_header_still_dispatches");
+
+        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+            .await
+            .expect("failed to bind test server");
+        let addr = server.local_addr();
+        let url = format!("http://{}/gitea-webhook/post", addr);
+
+        let body = format!(r#"{{"ref":"refs/heads/main","_test":"{}"}}"#, m);
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .header("X-Gitea-Event", "push")
+            .body(body)
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        server.shutdown().await;
+
+        assert_eq!(
+            count_recorded_with(&m),
+            1,
+            "request without X-Gitea-Delivery must still dispatch"
+        );
     }
 }

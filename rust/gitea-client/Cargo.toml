@@ -38,6 +38,10 @@ rustls-pki-types = { version = "1", features = ["alloc"] }
 webpki-roots = "1"  # matches version pulled in by reqwest's rustls-tls feature
 # Stage 16 — IP allowlist (CIDR matching for IPv4 + IPv6).
 cidr = "0.2"
+# Stage 9.A enhancement — Prometheus metrics endpoint (#10) and
+# idempotency cache (#11) for X-Gitea-Delivery dedup.
+prometheus = "0.13"
+lru = "0.12"
 
 [dev-dependencies]
 wiremock = "0.6"

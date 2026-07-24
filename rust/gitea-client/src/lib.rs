@@ -23,6 +23,7 @@ pub mod jni;
 pub mod jni_polling;
 pub mod jni_webhook;
 pub mod polling;
+pub mod pool;
 pub mod proxy;
 pub mod rate_limiter;
 pub mod runtime;

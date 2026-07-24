@@ -60,33 +60,39 @@ impl GiteaClient {
     /// `server_url` should be the Gitea web root (e.g. `https://gitea.example.com`),
     /// without a trailing slash and without `/api/v1`.
     ///
-    /// If the process-wide PEM trust material has been installed via
-    /// [`crate::tls_store::set_extra_pem`] (typically by the JNI export
-    /// `nativeSetTrustedCertificates` during plugin init), it is merged on
-    /// top of the Mozilla CA bundle here. Pass-through callers that want
-    /// to override the global PEM should use [`Self::with_extra_pem`].
+    /// The underlying `reqwest::Client` is sourced from the process-wide
+    /// connection pool ([`crate::pool`]) keyed by `(base_url, auth)`, so
+    /// repeated calls with the same arguments reuse the TLS session /
+    /// connection pool instead of rebuilding it from scratch. The PEM
+    /// trust material installed via [`crate::tls_store::set_extra_pem`] is
+    /// picked up implicitly by the pool — see [`Self::with_extra_pem`]
+    /// for the rare case where a caller needs an explicit PEM override.
     pub fn new(server_url: &str, auth: Auth) -> Result<Self, GiteaError> {
-        let global_pem = crate::tls_store::extra_pem();
-        Self::with_extra_pem(server_url, auth, global_pem.as_deref())
+        Self::with_extra_pem(server_url, auth, None)
     }
 
     /// Construct a client with an explicit extra PEM blob.
     ///
     /// `extra_pem` = additional CA certificates in PEM format (may contain
-    /// any number of `BEGIN CERTIFICATE` blocks). Pass `None` to trust
-    /// only the Mozilla CA bundle that `reqwest` ships via `rustls-tls`.
+    /// any number of `BEGIN CERTIFICATE` blocks). Pass `None` to use the
+    /// process-global PEM trust material (the common path — every caller
+    /// that does not need per-instance trust customisation should go
+    /// through [`Self::new`]).
     ///
-    /// This is the entry point used by tests that want to control the
-    /// trust store independently of the global slot, and by [`Self::new`]
-    /// when forwarding the global PEM.
+    /// The `reqwest::Client` is always sourced from [`crate::pool`] — the
+    /// `extra_pem` argument here is retained for API compatibility with
+    /// the few tests that historically built a client with an explicit
+    /// PEM, but it is intentionally ignored on the pooled path because
+    /// the cache key deliberately excludes the PEM (see
+    /// [`crate::pool`] module docs for the rationale).
     pub fn with_extra_pem(
         server_url: &str,
         auth: Auth,
-        extra_pem: Option<&[u8]>,
+        _extra_pem: Option<&[u8]>,
     ) -> Result<Self, GiteaError> {
         let trimmed = server_url.trim_end_matches('/');
         let base_url = Url::parse(&format!("{}/api/v1", trimmed))?;
-        let http = crate::tls::build_reqwest_client(extra_pem).map_err(GiteaError::Network)?;
+        let http = crate::pool::acquire(server_url, &auth)?;
         Ok(Self {
             base_url,
             auth,
