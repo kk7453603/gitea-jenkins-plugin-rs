@@ -460,12 +460,40 @@ public class GiteaServers extends GlobalConfiguration {
      * classpath at this call site.</p>
      */
     private String buildProxyJson() {
+        // Effective proxy: explicit GiteaServers.proxyUrl wins, otherwise
+        // fall back to Jenkins.get().proxy (the global "Advanced → Proxy"
+        // setting under Manage Jenkins → System). Many enterprise deployments
+        // only configure the global proxy and would otherwise silently lose
+        // outbound traffic to a corporate proxy.
+        String url = getProxyUrl();
+        String user = getProxyUsername();
+        String pass = getProxyPassword();
+        String noProxy = getNoProxyHosts();
+        if (url == null || url.isEmpty()) {
+            hudson.ProxyConfiguration jp = Jenkins.get().proxy;
+            if (jp != null && jp.getName() != null && !jp.getName().isEmpty()) {
+                url = jp.getName() + ":" + jp.getPort();
+                user = jp.getUserName();
+                pass = jp.getPassword();
+                // Jenkins ProxyConfiguration.getNoProxyHostPatterns() returns
+                // a List<Pattern>; we collapse to the comma-separated form
+                // reqwest's NoProxy::from_string expects. Pattern.toString()
+                // reproduces the original pattern string for the common cases
+                // Jenkins accepts (hostname substrings, wildcards).
+                java.util.List<java.util.regex.Pattern> patterns = jp.getNoProxyHostPatterns();
+                if (patterns != null && !patterns.isEmpty()) {
+                    noProxy = patterns.stream()
+                            .map(java.util.regex.Pattern::toString)
+                            .collect(java.util.stream.Collectors.joining(","));
+                }
+            }
+        }
         StringBuilder sb = new StringBuilder(96);
         sb.append('{');
-        sb.append("\"url\":").append(quote(getProxyUrl())).append(',');
-        sb.append("\"username\":").append(quote(getProxyUsername())).append(',');
-        sb.append("\"password\":").append(quote(getProxyPassword())).append(',');
-        sb.append("\"noProxyHosts\":").append(quote(getNoProxyHosts()));
+        sb.append("\"url\":").append(quote(url)).append(',');
+        sb.append("\"username\":").append(quote(user)).append(',');
+        sb.append("\"password\":").append(quote(pass)).append(',');
+        sb.append("\"noProxyHosts\":").append(quote(noProxy));
         sb.append('}');
         return sb.toString();
     }
@@ -769,6 +797,75 @@ public class GiteaServers extends GlobalConfiguration {
         // We assemble JSON by hand to avoid pulling Jackson into this
         // call site (consistent with buildProxyJson()).
         StringBuilder targets = new StringBuilder();
+
+        // Primary source of polling targets: every GiteaSCMSource defined
+        // across all Jenkins jobs. These know their (serverUrl, owner, repo,
+        // credentialsId) tuple, which is exactly what the Rust poller needs
+        // to issue cheap If-None-Match requests against /repos/.../branches.
+        //
+        // GiteaSCMSource is not an Item, so we walk SCMSourceOwners
+        // (which ARE items — e.g. WorkflowMultiBranchProject) and pull their
+        // configured SCM sources.
+        java.util.List<org.jenkinsci.plugin.gitea.GiteaSCMSource> giteaSources = new java.util.ArrayList<>();
+        for (jenkins.scm.api.SCMSourceOwner owner :
+                Jenkins.get().getAllItems(jenkins.scm.api.SCMSourceOwner.class)) {
+            for (jenkins.scm.api.SCMSource src : owner.getSCMSources()) {
+                if (src instanceof org.jenkinsci.plugin.gitea.GiteaSCMSource) {
+                    giteaSources.add((org.jenkinsci.plugin.gitea.GiteaSCMSource) src);
+                }
+            }
+        }
+        for (org.jenkinsci.plugin.gitea.GiteaSCMSource src : giteaSources) {
+            String serverUrl = src.getServerUrl();
+            String owner = src.getRepoOwner();
+            String repo = src.getRepository();
+            if (serverUrl == null || serverUrl.isEmpty()
+                    || owner == null || owner.isEmpty()
+                    || repo == null || repo.isEmpty()) {
+                continue;
+            }
+            if (targets.length() > 0) {
+                targets.append(',');
+            }
+            targets.append('{');
+            targets.append("\"serverUrl\":").append(quote(serverUrl)).append(',');
+            int authType = 0;
+            String authSecret = "";
+            try {
+                // Ask AuthenticationTokens to convert whatever the SCM
+                // source's credentials() resolves to. This matches how
+                // RustGiteaConnectionFactory resolves auth at request time.
+                org.jenkinsci.plugin.gitea.client.api.GiteaAuth auth =
+                        jenkins.authentication.tokens.api.AuthenticationTokens.convert(
+                                org.jenkinsci.plugin.gitea.client.api.GiteaAuth.class,
+                                src.credentials());
+                if (auth instanceof org.jenkinsci.plugin.gitea.client.api.GiteaAuthToken) {
+                    authType = 1;
+                    authSecret = ((org.jenkinsci.plugin.gitea.client.api.GiteaAuthToken) auth).getToken();
+                } else if (auth instanceof org.jenkinsci.plugin.gitea.client.api.GiteaAuthUser) {
+                    org.jenkinsci.plugin.gitea.client.api.GiteaAuthUser user =
+                            (org.jenkinsci.plugin.gitea.client.api.GiteaAuthUser) auth;
+                    authType = 2;
+                    authSecret = user.getUsername() + ":" + user.getPassword();
+                }
+            } catch (Throwable t) {
+                LOGGER.log(Level.FINE,
+                        "Could not resolve GiteaAuth for polling target " + serverUrl
+                                + "/" + owner + "/" + repo, t);
+            }
+            targets.append("\"authType\":").append(authType).append(',');
+            targets.append("\"authSecret\":").append(quote(authSecret)).append(',');
+            targets.append("\"owner\":").append(quote(owner)).append(',');
+            targets.append("\"repo\":").append(quote(repo));
+            targets.append('}');
+        }
+
+        // Fallback / additional targets: every configured GiteaServer
+        // endpoint without a specific repo. The native poller will
+        // log-and-skip these (owner="" → /repos//branches 404), but they
+        // keep the loop alive even when no SCM source exists yet — useful
+        // right after a fresh install where the operator wants polling to
+        // start as soon as the first job is added.
         for (GiteaServer endpoint : getServers()) {
             String serverUrl = endpoint.getServerUrl();
             if (serverUrl == null || serverUrl.isEmpty()) {
@@ -779,9 +876,6 @@ public class GiteaServers extends GlobalConfiguration {
             }
             targets.append('{');
             targets.append("\"serverUrl\":").append(quote(serverUrl)).append(',');
-            // Resolve the GiteaAuth to the (authType, authSecret) pair
-            // that the native decode_auth expects. We mirror the encoding
-            // in RustGiteaConnection's constructor: Token=1, Basic=2.
             int authType = 0;
             String authSecret = "";
             try {
@@ -799,22 +893,15 @@ public class GiteaServers extends GlobalConfiguration {
                     authSecret = user.getUsername() + ":" + user.getPassword();
                 }
             } catch (Throwable t) {
-                // Credentials resolution can fail at runtime (missing
-                // creds, decryption errors). Fall back to anonymous —
-                // the poll will still succeed for public repositories.
                 LOGGER.log(Level.FINE, "Could not resolve GiteaAuth for polling target " + serverUrl, t);
             }
             targets.append("\"authType\":").append(authType).append(',');
             targets.append("\"authSecret\":").append(quote(authSecret)).append(',');
-            // Server-scoped probe: leave owner/repo empty. The native
-            // polling loop treats these as "skip" markers (an empty
-            // owner causes the /repos//branches URL to 404 and the
-            // target is logged-and-skipped). The stage-10 design doc
-            // leaves repository enumeration to a future enhancement.
             targets.append("\"owner\":").append(quote("")).append(',');
             targets.append("\"repo\":").append(quote(""));
             targets.append('}');
         }
+
         StringBuilder sb = new StringBuilder(64);
         sb.append('{');
         sb.append("\"intervalSeconds\":").append(getPollingIntervalSeconds()).append(',');

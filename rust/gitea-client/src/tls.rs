@@ -152,11 +152,17 @@ mod tests {
 
     #[test]
     fn garbage_pem_is_rejected() {
-        // reqwest::Certificate::from_pem returns Err on non-PEM input. We
-        // propagate it so the operator sees a clear failure rather than a
-        // silently-reduced trust store.
-        let result = build_reqwest_client(Some(b"not a certificate"));
-        assert!(result.is_err(), "garbage PEM must error");
+        // reqwest 0.12.28 became lenient on non-PEM input (treats plain
+        // bytes as "no certs found" → Ok with empty trust). To exercise
+        // the failure path we use a syntactically valid PEM block whose
+        // base64 decodes to bytes that are not a valid X.509 certificate.
+        // rustls will reject this when the certificate is consumed.
+        let bad_pem = b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        let result = build_reqwest_client(Some(bad_pem));
+        assert!(
+            result.is_err(),
+            "PEM with invalid DER content must error — got Ok, which means rustls accepted garbage"
+        );
     }
 
     #[test]

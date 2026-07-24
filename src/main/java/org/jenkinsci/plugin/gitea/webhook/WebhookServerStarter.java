@@ -24,74 +24,63 @@
 package org.jenkinsci.plugin.gitea.webhook;
 
 import hudson.Extension;
-import hudson.model.AsyncPeriodicWork;
-import hudson.model.TaskListener;
-import java.io.IOException;
+import hudson.init.InitMilestone;
+import hudson.init.Initializer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.jenkinsci.plugin.gitea.servers.GiteaServers;
 
 /**
- * One-shot {@link AsyncPeriodicWork} that starts the Rust webhook server
- * shortly after Jenkins finishes booting.
+ * Starts the Rust webhook server on Jenkins boot, after all extensions
+ * have been augmented and the global {@link GiteaServers} config has been
+ * loaded from disk.
  *
- * <p>We use {@link AsyncPeriodicWork} with a recurrence period of
- * {@link Long#MAX_VALUE} so the task runs exactly once, in a background
- * thread, after Jenkins has finished loading its global configuration. The
- * first execution reads the webhook settings from {@link GiteaServers}
- * and hands them to
- * {@link RustWebhookDispatcher#configure(int, String, String, String, int)}.</p>
+ * <h2>Why {@code @Initializer} and not {@code AsyncPeriodicWork}</h2>
  *
- * <p>Subsequent saves of the Gitea global config call
+ * <p>Previously this used {@code AsyncPeriodicWork} with a
+ * {@code Long.MAX_VALUE} recurrence period. That pattern is unreliable
+ * on real Jenkins controllers — the work is scheduled but the first
+ * execution can lag minutes behind boot, and on some setups (heavy
+ * plugin list, slow Jenkins startup) it is skipped entirely. The result
+ * was that the webhook server had to be started manually through
+ * Script Console on every restart.</p>
+ *
+ * <p>{@link Initializer} annotated methods are invoked synchronously by
+ * Jenkins during its startup sequence, at the
+ * {@link InitMilestone#EXTENSIONS_AUGMENTED EXTENSIONS_AUGMENTED}
+ * milestone — guaranteed to run after {@link GiteaServers#load()} and
+ * before any jobs are loaded. That gives us a deterministic,
+ * fast-starting hook for binding the webhook socket.</p>
+ *
+ * <h2>Subsequent reconfiguration</h2>
+ *
+ * After boot, every save of the Gitea global config calls
  * {@link RustWebhookDispatcher#configure(int, String, String, String, int)}
- * directly from {@link GiteaServers#configure}, which restarts the server
- * on the new port/secret if any setting changed.</p>
- *
- * <h2>Why not start from a static initialiser?</h2>
- *
- * {@link RustWebhookDispatcher}'s static block only loads the native library;
- * it must not call {@code nativeStart} because {@link GiteaServers} may not
- * have been loaded yet (its {@link GiteaServers#load()} happens during
- * {@code Jenkins.start()}), and binding a socket before configuration is
- * loaded would either bind on the wrong port or fail outright.
+ * directly from {@link GiteaServers#configure}, which restarts the
+ * server on the new port/secret if any setting changed. This class
+ * only handles the initial boot-time start.
  */
 @Extension
-public class WebhookServerStarter extends AsyncPeriodicWork {
+public class WebhookServerStarter {
+
+    private static final Logger LOGGER = Logger.getLogger(WebhookServerStarter.class.getName());
 
     /**
-     * Builds a new starter. {@link AsyncPeriodicWork}'s constructor takes the
-     * human-readable name used in thread dumps and the periodic-work log.
+     * Boot-time hook. Runs once after Jenkins has loaded global config and
+     * augmented all extensions. Failures are logged and swallowed — a
+     * misconfigured port must not abort Jenkins startup. The operator can
+     * fix the config in {@code Manage Jenkins → System → Gitea Servers}
+     * and save it; that re-triggers
+     * {@link RustWebhookDispatcher#configure(int, String, String, String, int)}.
      */
-    public WebhookServerStarter() {
-        super("Gitea webhook server starter");
-    }
-
-    /**
-     * Run once, never again. {@link Long#MAX_VALUE} effectively disables
-     * rescheduling; {@link AsyncPeriodicWork} will not invoke this task a
-     * second time within any reasonable Jenkins uptime.
-     *
-     * @return {@link Long#MAX_VALUE}.
-     */
-    @Override
-    public long getRecurrencePeriod() {
-        return Long.MAX_VALUE;
-    }
-
-    /**
-     * Read the Gitea global configuration and hand it to the dispatcher.
-     *
-     * <p>Failures here are logged but never rethrown — we do not want a
-     * misconfigured port to prevent Jenkins from finishing its startup.</p>
-     *
-     * @param listener unused — we log through {@code java.util.logging}.
-     * @throws IOException never, but the parent signature declares it.
-     * @throws InterruptedException never, but the parent signature declares it.
-     */
-    @Override
-    protected void execute(TaskListener listener) throws IOException, InterruptedException {
+    @Initializer(after = InitMilestone.EXTENSIONS_AUGMENTED, before = InitMilestone.JOB_LOADED)
+    public static void start() {
         try {
             GiteaServers servers = GiteaServers.get();
             if (servers == null) {
                 // Jenkins is shutting down before GiteaServers was registered.
+                LOGGER.warning("GiteaServers not available — webhook server will not start automatically. "
+                        + "It will start on the next global config save.");
                 return;
             }
             RustWebhookDispatcher.configure(
@@ -102,12 +91,10 @@ public class WebhookServerStarter extends AsyncPeriodicWork {
                     servers.getWebhookRateLimitPerMinute()
             );
         } catch (Throwable t) {
-            // Log and swallow — see class javadoc.
-            try {
-                listener.error("Failed to start Gitea webhook server: " + t);
-            } catch (Throwable ignored) {
-                // listener may itself be broken; fall through to logger.
-            }
+            LOGGER.log(Level.SEVERE,
+                    "Failed to auto-start Gitea webhook server on boot — "
+                            + "fix the Gitea Servers config and save it to retry.",
+                    t);
         }
     }
 }
