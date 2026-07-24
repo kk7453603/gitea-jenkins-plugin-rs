@@ -103,6 +103,11 @@ public class RustWebhookDispatcher {
     static {
         try {
             NativeLibraryLoader.load("gitea_rust");
+            // Register this class with the native side so tokio worker threads
+            // can resolve RustWebhookDispatcher through the plugin ClassLoader
+            // (env.find_class uses the system ClassLoader and would fail with
+            // ClassNotFoundException on every webhook delivery).
+            nativeRegisterDispatcherClass(RustWebhookDispatcher.class);
         } catch (UnsatisfiedLinkError e) {
             LOGGER.log(Level.SEVERE, "Failed to load libgitea_rust required by RustWebhookDispatcher", e);
             throw e;
@@ -340,4 +345,16 @@ public class RustWebhookDispatcher {
      * Stop the native Rust webhook server. Idempotent.
      */
     private static native void nativeStop();
+
+    /**
+     * Register this class as the JNI callback target. Must be called from
+     * {@link #<clinit>} (which Java does automatically on first reference)
+     * before {@link #nativeStart}.
+     *
+     * <p>The native side stores a {@code GlobalRef} to the {@code jclass}
+     * so that tokio worker threads — which use the system ClassLoader — can
+     * still reach {@code RustWebhookDispatcher.handleEvent(...)} through
+     * the plugin's ClassLoader.</p>
+     */
+    private static native void nativeRegisterDispatcherClass(Class<?> clazz);
 }

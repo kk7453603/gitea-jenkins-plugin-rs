@@ -254,10 +254,13 @@ fn invoke_callback(jvm: &JavaVM, event_type: &str, payload: &str) {
             return;
         }
     };
-    let class = match env.find_class("org/jenkinsci/plugin/gitea/webhook/RustWebhookDispatcher") {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = ?e, "polling: find_class RustWebhookDispatcher failed");
+    // Use the plugin-classloader global ref registered by RustWebhookDispatcher.<clinit>
+    // via nativeRegisterDispatcherClass — env.find_class uses the system ClassLoader
+    // and cannot see plugin classes.
+    let class_ref = match crate::jni_webhook::dispatcher_class() {
+        Some(c) => c,
+        None => {
+            tracing::warn!("polling: DISPATCHER_CLASS not registered — call nativeRegisterDispatcherClass first");
             return;
         }
     };
@@ -276,7 +279,7 @@ fn invoke_callback(jvm: &JavaVM, event_type: &str, payload: &str) {
         }
     };
     if let Err(e) = env.call_static_method(
-        class,
+        class_ref,
         "handleEvent",
         "(Ljava/lang/String;Ljava/lang/String;)V",
         &[(&j_type).into(), (&j_payload).into()],

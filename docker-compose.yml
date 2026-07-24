@@ -8,6 +8,10 @@ services:
     ports:
       - "8080:8080"
       - "50000:50000"
+      - "8081:8081"   # Rust webhook server (этап 9)
+    environment:
+      # Skip setup wizard for dev testing — admin/admin auto-logged in
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
     volumes:
       - jenkins_home:/var/jenkins_home
     restart: unless-stopped

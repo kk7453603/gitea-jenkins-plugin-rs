@@ -34,7 +34,7 @@
 //! itself runs in a background tokio task; only the bind and the spawn
 //! happen on the calling thread.
 
-use jni::objects::{JClass, JString};
+use jni::objects::{GlobalRef, JClass, JString};
 use jni::sys::jint;
 use jni::JNIEnv;
 use once_cell::sync::OnceCell;
@@ -50,6 +50,23 @@ static SERVER: OnceCell<Mutex<Option<WebhookServer>>> = OnceCell::new();
 fn server_slot() -> &'static Mutex<Option<WebhookServer>> {
     SERVER.get_or_init(|| Mutex::new(None))
 }
+
+/// Access the registered `RustWebhookDispatcher` class global reference.
+/// Returns `None` if `nativeRegisterDispatcherClass` has not been called
+/// yet (e.g. during cold start, or in unit tests without a JVM).
+pub fn dispatcher_class() -> Option<&'static GlobalRef> {
+    DISPATCHER_CLASS.get()
+}
+
+/// Global reference to `org.jenkinsci.plugin.gitea.webhook.RustWebhookDispatcher`
+/// class, registered by Java-side `<clinit>` via `nativeRegisterDispatcherClass`.
+///
+/// **Why:** `JNIEnv::find_class` uses the *system* ClassLoader, but Jenkins
+/// plugin classes live in the plugin ClassLoader. Without this global ref,
+/// `find_class` throws `ClassNotFoundException` when invoked from a tokio
+/// worker thread. The Java side passes its own `Class<?>` once at static-init
+/// time, and we hold it as a `GlobalRef` for the lifetime of the JVM.
+static DISPATCHER_CLASS: OnceCell<GlobalRef> = OnceCell::new();
 
 /// The Java callback closure installed when the server starts. Kept in a
 /// static so the HTTP handler (which is `Clone`) can reach it through
@@ -78,9 +95,13 @@ fn make_jni_callback(
             .attach_current_thread()
             .map_err(|e| format!("jni attach: {}", e))?;
 
-        let class = env
-            .find_class("org/jenkinsci/plugin/gitea/webhook/RustWebhookDispatcher")
-            .map_err(|e| format!("find_class RustWebhookDispatcher: {}", e))?;
+        // Use the plugin-classloader-resident global ref registered at
+        // static-init time, instead of find_class (which goes through
+        // the system ClassLoader and misses plugin classes).
+        // jni-rs 0.21 implements `Desc<JClass>` for `&GlobalRef`.
+        let class_ref = DISPATCHER_CLASS
+            .get()
+            .ok_or_else(|| "DISPATCHER_CLASS not registered — call nativeRegisterDispatcherClass first".to_string())?;
 
         let j_event_type = env
             .new_string(event_type)
@@ -90,7 +111,7 @@ fn make_jni_callback(
             .map_err(|e| format!("new_string payload: {}", e))?;
 
         env.call_static_method(
-            class,
+            class_ref,
             "handleEvent",
             "(Ljava/lang/String;Ljava/lang/String;)V",
             &[(&j_event_type).into(), (&j_payload).into()],
@@ -99,6 +120,29 @@ fn make_jni_callback(
 
         Ok(())
     })
+}
+
+/// `Java_…_RustWebhookDispatcher_nativeRegisterDispatcherClass` — receive
+/// a global reference to the `RustWebhookDispatcher` class from Java's
+/// static initializer. Must be called before `nativeStart`.
+#[no_mangle]
+pub extern "system" fn Java_org_jenkinsci_plugin_gitea_webhook_RustWebhookDispatcher_nativeRegisterDispatcherClass(
+    mut env: JNIEnv,
+    _cls: JClass,
+    dispatcher_class: JClass,
+) {
+    match env.new_global_ref(dispatcher_class) {
+        Ok(global) => {
+            if DISPATCHER_CLASS.set(global).is_err() {
+                tracing::debug!("DISPATCHER_CLASS already set (plugin reload) — keeping original");
+            } else {
+                tracing::info!("DISPATCHER_CLASS registered for JNI callbacks");
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "nativeRegisterDispatcherClass: new_global_ref failed");
+        }
+    }
 }
 
 /// `Java_…_RustWebhookDispatcher_nativeStart` — start the webhook server.
