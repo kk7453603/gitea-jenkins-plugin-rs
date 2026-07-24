@@ -85,11 +85,35 @@ public class GiteaWebhookListener {
      * method returns {@code null}; callers must treat that as "do not
      * register hooks" (matching the upstream behaviour).</p>
      *
+     * <p><strong>Reverse-proxy override:</strong> when
+     * {@link GiteaServers#getWebhookExternalUrl()} is non-empty, that URL
+     * is used verbatim (the operator is responsible for the path). This is
+     * the production setup for Jenkins behind nginx / Cloudflare / AWS ALB
+     * where the internal {@code http://<jenkinsHost>:<webhookPort>/...}
+     * synthesized URL is not reachable from the Gitea server. If the
+     * supplied value already ends with {@code /gitea-webhook/post} it is
+     * used as-is; otherwise that suffix is appended so the operator can
+     * supply just {@code https://jenkins.corp/gitea-webhook/post} or even
+     * a bare {@code scheme://host:port}.</p>
+     *
      * @return the webhook URL (e.g.
      *         {@code http://jenkins.example.com:8081/gitea-webhook/post}),
      *         or {@code null} if the Jenkins URL is not configured.
      */
     private static String buildHookUrl() {
+        GiteaServers servers = GiteaServers.get();
+        String external = servers == null ? null : servers.getWebhookExternalUrl();
+        if (external != null && !external.isEmpty()) {
+            // External URL overrides everything. Strip trailing slashes,
+            // then either use as-is (operator supplied the full path) or
+            // append the canonical /gitea-webhook/post suffix.
+            if (external.endsWith("/gitea-webhook/post")
+                    || external.endsWith("/gitea-webhook/post/")) {
+                return external;
+            }
+            String trimmed = external.replaceAll("/+$", "");
+            return trimmed + "/gitea-webhook/post";
+        }
         JenkinsLocationConfiguration locationConfiguration = JenkinsLocationConfiguration.get();
         String rootUrl = locationConfiguration.getUrl();
         if (StringUtils.isBlank(rootUrl) || rootUrl.startsWith("http://localhost:")) {
@@ -108,7 +132,9 @@ public class GiteaWebhookListener {
                 LOGGER.log(Level.FINE, "JENKINS_URL has no host. Cannot register a WebHook.");
                 return null;
             }
-            int webhookPort = GiteaServers.get().getWebhookPort();
+            int webhookPort = servers == null
+                    ? GiteaServers.DEFAULT_WEBHOOK_PORT
+                    : servers.getWebhookPort();
             return new URI(scheme, null, host, webhookPort, "/gitea-webhook/post", null, null).toASCIIString();
         } catch (URISyntaxException e) {
             LOGGER.log(Level.WARNING, "Could not build webhook URL from JENKINS_URL=" + rootUrl, e);

@@ -129,6 +129,19 @@ public class GiteaServers extends GlobalConfiguration {
     private int webhookRateLimitPerMinute = 60;
 
     /**
+     * Optional external URL for webhook delivery. When non-empty, this URL
+     * is registered with Gitea verbatim instead of the synthesized
+     * {@code http://<jenkinsHost>:<webhookPort>/gitea-webhook/post}. Useful
+     * when Jenkins sits behind a reverse proxy (nginx, Cloudflare, AWS ALB)
+     * where the internal URL is not reachable from Gitea.
+     *
+     * <p>Example: {@code https://jenkins.internal.corp/gitea-webhook/post}.
+     * The path component is ignored if present — only scheme + host + port
+     * are used to rebuild the URL with the internal {@link #getWebhookPort()}.</p>
+     */
+    private String webhookExternalUrl = "";
+
+    /**
      * Additional CA certificates in PEM format. Appended on top of the
      * Mozilla CA bundle that the native Rust HTTP client trusts by default
      * — use this for self-signed Gitea instances or corporate CAs whose
@@ -648,6 +661,32 @@ public class GiteaServers extends GlobalConfiguration {
     @Restricted(NoExternalUse.class)
     public void setWebhookRateLimitPerMinute(int webhookRateLimitPerMinute) {
         this.webhookRateLimitPerMinute = webhookRateLimitPerMinute;
+    }
+
+    /**
+     * Optional external URL that overrides the synthesized webhook URL.
+     * Empty string (the default) disables the override — the listener
+     * then falls back to building
+     * {@code http://<jenkinsHost>:<webhookPort>/gitea-webhook/post} from
+     * {@code JenkinsLocationConfiguration}. See {@link #webhookExternalUrl}.
+     *
+     * @return the external URL (never {@code null}).
+     */
+    @Restricted(NoExternalUse.class)
+    public String getWebhookExternalUrl() {
+        return webhookExternalUrl == null ? "" : webhookExternalUrl;
+    }
+
+    /**
+     * Set the optional external webhook URL. Persisted via global config.
+     * {@code null} is normalised to the empty string (which disables the
+     * override).
+     *
+     * @param webhookExternalUrl the new URL; may be {@code null} or empty.
+     */
+    @Restricted(NoExternalUse.class)
+    public void setWebhookExternalUrl(String webhookExternalUrl) {
+        this.webhookExternalUrl = webhookExternalUrl == null ? "" : webhookExternalUrl;
     }
 
     /**
