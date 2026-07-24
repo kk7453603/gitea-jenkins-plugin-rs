@@ -38,88 +38,117 @@ import java.util.concurrent.ConcurrentHashMap;
  * {@link System#load(String)}.
  *
  * <p>The native library lives in the plugin jar under
- * {@code /META-INF/native/linux/amd64/lib<name>.so}. We cannot use
- * {@link System#loadLibrary(String)} because that relies on
- * {@code java.library.path}, which we do not control on the Jenkins
- * controller. Instead we copy the {@code .so} to a temporary file on disk
+ * {@code /META-INF/native/<os>/<arch>/lib<name>.<ext>} where {@code <os>}
+ * is {@code linux}, {@code darwin}, or {@code windows} and {@code <arch>}
+ * is {@code amd64}, {@code aarch64}, or {@code x86}. We detect the
+ * platform at load time and pick the right resource path.</p>
+ *
+ * <p>We cannot use {@link System#loadLibrary(String)} because that relies
+ * on {@code java.library.path}, which we do not control on the Jenkins
+ * controller. Instead we copy the binary to a temporary file on disk
  * (marked {@code deleteOnExit}) and load it by absolute path.</p>
  *
- * <p>This loader is intentionally Linux x86_64-only for the MVP. On any
- * other architecture the resource will be absent and we throw an
- * {@link UnsatisfiedLinkError} with a clear message. See
- * {@code IMPLEMENTATION_PLAN.md} for the cross-platform story.</p>
+ * <p>If the exact {@code <os>/<arch>} pair is not bundled, we fall back to
+ * any sibling directory with the same OS (so an amd64-only build still
+ * loads on an arm64 controller if a universal variant is bundled). If
+ * nothing matches we throw an {@link UnsatisfiedLinkError} with a clear
+ * message naming the resource paths we tried.</p>
  */
 public final class NativeLibraryLoader {
 
-    /**
-     * Names of libraries that have already been loaded by this classloader.
-     *
-     * <p>The Jenkins plugin now has two static initializers that both call
-     * {@link #load} for {@code "gitea_rust"}:
-     * {@code RustGiteaConnection.&lt;clinit&gt;} (the API client shim) and
-     * {@code RustWebhookDispatcher.&lt;clinit&gt;} (the webhook listener).
-     * On some JVMs a second {@link System#load(String)} of the same absolute
-     * path throws {@link UnsatisfiedLinkError} ("Native library already
-     * loaded"), which would crash whichever class happens to initialise
-     * second. We therefore short-circuit any repeat load request for the
-     * same logical library name within this classloader.</p>
-     *
-     * <p>The set is keyed by the logical library name (e.g.
-     * {@code "gitea_rust"}), not by the on-disk temp path, because the path
-     * changes between calls (we generate a fresh temp file each time).</p>
-     */
     private static final Set<String> LOADED =
             Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
     /**
      * Extract the library named {@code libName} from
-     * {@code /META-INF/native/linux/amd64/} and load it.
+     * {@code /META-INF/native/<os>/<arch>/} and load it.
      *
      * <p>Idempotent: a second call with the same {@code libName} is a no-op.
-     * This matters because both {@code RustGiteaConnection} and
-     * {@code RustWebhookDispatcher} invoke {@code load("gitea_rust")} from
-     * their respective static initialisers, and class initialisation order is
-     * not guaranteed.</p>
      *
-     * @param libName the library name without platform-specific prefix/suffix
-     *                (e.g. {@code "gitea_rust"} → {@code libgitea_rust.so}).
-     * @throws UnsatisfiedLinkError if the library resource is missing or
-     *                              cannot be loaded.
+     * @param libName library name without platform prefix/suffix
+     *                (e.g. {@code "gitea_rust"} → {@code libgitea_rust.so}
+     *                on Linux, {@code libgitea_rust.dylib} on macOS).
+     * @throws UnsatisfiedLinkError if no platform-matching resource exists.
      */
     @SuppressFBWarnings(value = "RV_RETURN_VALUE_IGNORED_BAD_PRACTICE",
             justification = "deleteOnExit return value is intentionally ignored.")
     public static void load(String libName) {
-        // `Set.add` returns false if the element was already present, which
-        // atomically collapses concurrent first-time loads onto a single
-        // winner — exactly the semantics we want.
         if (!LOADED.add(libName)) {
             return;
         }
-        String mappedName = System.mapLibraryName(libName); // libgitea_rust.so on Linux
-        String resourcePath = "/META-INF/native/linux/amd64/" + mappedName;
-        try (InputStream in = NativeLibraryLoader.class.getResourceAsStream(resourcePath)) {
-            if (in == null) {
-                // Roll back the "loaded" marker so a later retry (e.g. after a
-                // classpath fix) can actually attempt the load again.
+        String mappedName = System.mapLibraryName(libName);
+        // Try the exact platform path first, then fall back to alternate
+        // arches for the same OS (lets an amd64-only build load on arm64
+        // hosts when a universal binary is bundled).
+        String osTag = osTag();
+        String[] archCandidates = archCandidates();
+        UnsatisfiedLinkError lastError = null;
+        for (String arch : archCandidates) {
+            String resourcePath = "/META-INF/native/" + osTag + "/" + arch + "/" + mappedName;
+            try (InputStream in = NativeLibraryLoader.class.getResourceAsStream(resourcePath)) {
+                if (in == null) {
+                    continue;
+                }
+                String suffix = mappedName.endsWith(".dylib") ? ".dylib"
+                        : mappedName.endsWith(".dll") ? ".dll" : ".so";
+                Path tmp = Files.createTempFile("gitea-rust-", suffix);
+                tmp.toFile().deleteOnExit();
+                Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
+                System.load(tmp.toString());
+                return;
+            } catch (UnsatisfiedLinkError e) {
+                // Wrong ELF/mach-o architecture — remember and try the next candidate.
+                lastError = e;
                 LOADED.remove(libName);
-                throw new UnsatisfiedLinkError(
-                        "Missing native library: " + resourcePath
-                                + " (the Rust core is only bundled for linux/amd64 in this build)");
+            } catch (IOException e) {
+                LOADED.remove(libName);
+                throw new ExceptionInInitializerError(e);
             }
-            Path tmp = Files.createTempFile("gitea-rust-", ".so");
-            // best-effort cleanup on JVM shutdown; the file is small.
-            tmp.toFile().deleteOnExit();
-            Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
-            System.load(tmp.toString());
-        } catch (IOException e) {
-            LOADED.remove(libName);
-            throw new ExceptionInInitializerError(e);
-        } catch (UnsatisfiedLinkError e) {
-            // If the JVM refuses to load (e.g. wrong ELF architecture), roll
-            // back so a future call with a corrected library can succeed.
-            LOADED.remove(libName);
-            throw e;
         }
+        if (lastError != null) {
+            throw lastError;
+        }
+        // No candidate resource was found at all.
+        LOADED.remove(libName);
+        StringBuilder tried = new StringBuilder();
+        for (String arch : archCandidates) {
+            tried.append(" /META-INF/native/").append(osTag).append('/').append(arch).append('/').append(mappedName);
+        }
+        throw new UnsatisfiedLinkError(
+                "Missing native library for os=" + osTag
+                        + " arch=" + String.join("/", archCandidates) + ". Tried:" + tried);
+    }
+
+    /**
+     * Map {@code os.name} system property to our resource path segment.
+     */
+    private static String osTag() {
+        String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        if (os.contains("linux")) return "linux";
+        if (os.contains("mac") || os.contains("darwin")) return "darwin";
+        if (os.contains("windows")) return "windows";
+        return os;  // fall through — resource lookup will fail with a clear message
+    }
+
+    /**
+     * Map {@code os.arch} system property to our resource path segment(s).
+     * Returns a list so callers can try the exact match first and fall back
+     * to alternates (e.g. an amd64 binary on an aarch64 host via Rosetta).
+     */
+    private static String[] archCandidates() {
+        String arch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT);
+        if (arch.equals("aarch64") || arch.equals("arm64")) {
+            return new String[]{"aarch64", "amd64"};
+        }
+        if (arch.equals("amd64") || arch.equals("x86_64") || arch.equals("x86-64")) {
+            return new String[]{"amd64"};
+        }
+        if (arch.equals("x86") || arch.equals("i386") || arch.equals("i486")
+                || arch.equals("i586") || arch.equals("i686")) {
+            return new String[]{"x86"};
+        }
+        // Unknown arch — return as-is so the error message is informative.
+        return new String[]{arch};
     }
 
     private NativeLibraryLoader() {
