@@ -108,6 +108,11 @@ public class RustWebhookDispatcher {
             // (env.find_class uses the system ClassLoader and would fail with
             // ClassNotFoundException on every webhook delivery).
             nativeRegisterDispatcherClass(RustWebhookDispatcher.class);
+            // Wire Rust tracing events into java.util.logging. After this
+            // call every tracing::info!/warn!/error! in libgitea_rust.so
+            // surfaces in the Jenkins System Log UI under the
+            // "org.jenkinsci.plugin.gitea.*" logger namespace.
+            nativeInstallLogBridge();
         } catch (UnsatisfiedLinkError e) {
             LOGGER.log(Level.SEVERE, "Failed to load libgitea_rust required by RustWebhookDispatcher", e);
             throw e;
@@ -357,4 +362,16 @@ public class RustWebhookDispatcher {
      * the plugin's ClassLoader.</p>
      */
     private static native void nativeRegisterDispatcherClass(Class<?> clazz);
+
+    /**
+     * Install the Rust → Jenkins log bridge. Captures the current
+     * {@code JavaVM} and a {@code GlobalRef} to {@link RustLogReceiver},
+     * then registers a {@code tracing_subscriber::Layer} that forwards
+     * every {@code tracing::info!/warn!/error!} event into
+     * {@link RustLogReceiver#handleLog(String, String, String)}.
+     *
+     * <p>Idempotent: a second call is a no-op on the Rust side (the
+     * global tracing subscriber can only be set once per process).</p>
+     */
+    private static native void nativeInstallLogBridge();
 }
