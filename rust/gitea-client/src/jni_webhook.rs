@@ -173,6 +173,7 @@ pub extern "system" fn Java_org_jenkinsci_plugin_gitea_webhook_RustWebhookDispat
     bearer_token: JString,
     allowed_cidrs: JString,
     rate_limit_per_minute: jint,
+    path_prefix: JString,
 ) {
     let port_u16 = port.clamp(0, u16::MAX as jint) as u16;
 
@@ -210,6 +211,14 @@ pub extern "system" fn Java_org_jenkinsci_plugin_gitea_webhook_RustWebhookDispat
     } else {
         rate_limit_per_minute as u32
     };
+
+    // Optional path prefix override. Empty / null ⇒ None ⇒ Rust defaults
+    // to "/gitea-webhook" (back-compat with v1.0).
+    let prefix: Option<String> = env
+        .get_string(&path_prefix)
+        .ok()
+        .map(|c| c.into())
+        .filter(|s: &String| !s.is_empty());
 
     let jvm = match env.get_java_vm() {
         Ok(jvm) => jvm,
@@ -253,6 +262,7 @@ pub extern "system" fn Java_org_jenkinsci_plugin_gitea_webhook_RustWebhookDispat
             bearer,
             cidr_list,
             rate_limit_u32,
+            prefix,
         )
         .await
         {

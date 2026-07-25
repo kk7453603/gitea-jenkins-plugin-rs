@@ -290,8 +290,18 @@ impl WebhookServer {
         bearer_token: Option<String>,
         allowed_cidrs: Vec<String>,
         rate_limit_per_minute: u32,
+        path_prefix: Option<String>,
     ) -> std::io::Result<Self> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+        // Path prefix: defaults to "/gitea-webhook" (back-compat with v1.0).
+        // Operator can override (e.g. "/jenkins/gitea-plugin") when a corp
+        // reverse proxy requires a custom path. We trim trailing slashes and
+        // clamp the prefix to a non-empty path-looking string.
+        let prefix = path_prefix
+            .map(|p| p.trim().trim_end_matches('/').to_string())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "/gitea-webhook".to_string());
 
         let secret = hmac_secret
             .map(Arc::new)
@@ -338,23 +348,38 @@ impl WebhookServer {
             rate_limiter: rate_limiter.clone(),
         };
 
+        let post_path = format!("{prefix}/post");
+        let post_path_slash = format!("{post_path}/");
+        let health_path = format!("{prefix}/health");
+        let health_path_slash = format!("{health_path}/");
+        let metrics_path = format!("{prefix}/metrics");
+        let metrics_path_slash = format!("{metrics_path}/");
+
+        tracing::info!(
+            prefix = %prefix,
+            post = %post_path,
+            health = %health_path,
+            metrics = %metrics_path,
+            "webhook routes registered"
+        );
+
         let app = Router::new()
             // axum auto-redirects `/post` → `/post/` when only the trailing-
             // slash form is registered; register both explicitly so we
             // accept either spelling.
-            .route("/gitea-webhook/post", post(handle_webhook))
-            .route("/gitea-webhook/post/", post(handle_webhook))
+            .route(&post_path, post(handle_webhook))
+            .route(&post_path_slash, post(handle_webhook))
             // Kubernetes liveness/readiness probe target (issue #9).
             // Responds 200 `{"status":"ok"}` without any auth — the kubelet
             // does not (and should not) carry an HMAC secret.
-            .route("/gitea-webhook/health", get(health))
-            .route("/gitea-webhook/health/", get(health))
+            .route(&health_path, get(health))
+            .route(&health_path_slash, get(health))
             // Prometheus scrape target (issue #10). Exposed without auth
             // so the scraper does not need a per-namespace token; the
             // metrics carry no sensitive payload (no repo names, no
             // secrets, just counters + histogram buckets).
-            .route("/gitea-webhook/metrics", get(metrics))
-            .route("/gitea-webhook/metrics/", get(metrics))
+            .route(&metrics_path, get(metrics))
+            .route(&metrics_path_slash, get(metrics))
             .with_state(state);
 
         let addr: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse().expect(
@@ -803,7 +828,7 @@ mod tests {
         install_test_callback();
         let m = marker("server_accepts_valid_signature");
 
-        let mut server = WebhookServer::start(0, Some("topsecret".to_string()), None, vec![], 60)
+        let mut server = WebhookServer::start(0, Some("topsecret".to_string()), None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -846,7 +871,7 @@ mod tests {
         install_test_callback();
         let m = marker("server_rejects_invalid_signature");
 
-        let mut server = WebhookServer::start(0, Some("topsecret".to_string()), None, vec![], 60)
+        let mut server = WebhookServer::start(0, Some("topsecret".to_string()), None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -882,7 +907,7 @@ mod tests {
     async fn server_rejects_missing_signature_header() {
         install_test_callback();
 
-        let mut server = WebhookServer::start(0, Some("topsecret".to_string()), None, vec![], 60)
+        let mut server = WebhookServer::start(0, Some("topsecret".to_string()), None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -908,7 +933,7 @@ mod tests {
         install_test_callback();
         let m = marker("server_allows_no_secret_mode");
 
-        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+        let mut server = WebhookServer::start(0, None, None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -938,7 +963,7 @@ mod tests {
     async fn server_rejects_missing_event_header() {
         install_test_callback();
 
-        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+        let mut server = WebhookServer::start(0, None, None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -960,7 +985,7 @@ mod tests {
     async fn server_rejects_non_utf8_body() {
         install_test_callback();
 
-        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+        let mut server = WebhookServer::start(0, None, None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -985,7 +1010,7 @@ mod tests {
         install_test_callback();
         let m = marker("server_accepts_trailing_slash");
 
-        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+        let mut server = WebhookServer::start(0, None, None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -1011,7 +1036,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_shutdown_is_idempotent() {
-        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+        let mut server = WebhookServer::start(0, None, None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         server.shutdown().await;
@@ -1028,7 +1053,7 @@ mod tests {
         // The health probe must respond 200 even when HMAC is configured,
         // because the Kubernetes kubelet has no way to produce a valid
         // signature.
-        let mut server = WebhookServer::start(0, Some("topsecret".to_string()), None, vec![], 60)
+        let mut server = WebhookServer::start(0, Some("topsecret".to_string()), None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -1045,7 +1070,7 @@ mod tests {
     #[tokio::test]
     async fn health_endpoint_accepts_trailing_slash() {
         // Match the post/ behaviour: register both spellings.
-        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+        let mut server = WebhookServer::start(0, None, None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -1065,7 +1090,7 @@ mod tests {
     async fn metrics_endpoint_exposes_prometheus_text() {
         install_test_callback();
 
-        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+        let mut server = WebhookServer::start(0, None, None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -1122,7 +1147,7 @@ mod tests {
         install_test_callback();
         let m = marker("duplicate_delivery_is_skipped");
 
-        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+        let mut server = WebhookServer::start(0, None, None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -1172,7 +1197,7 @@ mod tests {
         let m1 = marker("distinct_deliveries_first");
         let m2 = marker("distinct_deliveries_second");
 
-        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+        let mut server = WebhookServer::start(0, None, None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();
@@ -1223,7 +1248,7 @@ mod tests {
         install_test_callback();
         let m = marker("missing_delivery_header_still_dispatches");
 
-        let mut server = WebhookServer::start(0, None, None, vec![], 60)
+        let mut server = WebhookServer::start(0, None, None, vec![], 60, None)
             .await
             .expect("failed to bind test server");
         let addr = server.local_addr();

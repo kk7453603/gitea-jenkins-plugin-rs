@@ -33,6 +33,10 @@
         <changelist>999999-SNAPSHOT</changelist>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <argLine>-Dfile.encoding=${project.build.sourceEncoding}</argLine>
+        <!-- Plugin class registered so Jenkins core calls start()/stop() on
+             load/unload. stop() triggers nativeStop() to clean up the
+             Tokio runtime (fixes the hot-reload thread leak). -->
+        <plugin-class>org.jenkinsci.plugin.gitea.GiteaPluginLifecycle</plugin-class>
         <!-- https://www.jenkins.io/doc/developer/plugin-development/choosing-jenkins-baseline/ -->
         <jenkins.baseline>2.528</jenkins.baseline>
         <jenkins.version>${jenkins.baseline}.3</jenkins.version>

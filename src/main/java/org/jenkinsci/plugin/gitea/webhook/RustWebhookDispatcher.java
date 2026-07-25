@@ -157,6 +157,11 @@ public class RustWebhookDispatcher {
     private static volatile int currentRateLimit = -1;
 
     /**
+     * The path prefix of the current server (or {@code null} if not running).
+     */
+    private static volatile String currentPath = null;
+
+    /**
      * Reconfigure the webhook server. Idempotent: if the server is already
      * running with the same settings this method is a no-op.
      *
@@ -183,16 +188,19 @@ public class RustWebhookDispatcher {
             String hmacSecret,
             String bearerToken,
             String allowedCidrs,
-            int rateLimitPerMinute) {
+            int rateLimitPerMinute,
+            String pathPrefix) {
         String secret = (hmacSecret == null || hmacSecret.isEmpty()) ? "" : hmacSecret;
         String bearer = (bearerToken == null || bearerToken.isEmpty()) ? "" : bearerToken;
         String cidrs = (allowedCidrs == null) ? "" : allowedCidrs;
+        String path = (pathPrefix == null || pathPrefix.isEmpty()) ? "/gitea-webhook" : pathPrefix;
         if (running
                 && port == currentPort
                 && safeEq(secret, currentSecret)
                 && safeEq(bearer, currentBearer)
                 && safeEq(cidrs, currentCidrs)
-                && rateLimitPerMinute == currentRateLimit) {
+                && rateLimitPerMinute == currentRateLimit
+                && safeEq(path, currentPath)) {
             // No change — avoid bouncing the listener on every save.
             return;
         }
@@ -208,16 +216,19 @@ public class RustWebhookDispatcher {
             currentBearer = null;
             currentCidrs = null;
             currentRateLimit = -1;
+            currentPath = null;
         }
         try {
-            nativeStart(port, secret, bearer, cidrs, rateLimitPerMinute);
+            nativeStart(port, secret, bearer, cidrs, rateLimitPerMinute, path);
             running = true;
             currentPort = port;
             currentSecret = secret;
             currentBearer = bearer;
             currentCidrs = cidrs;
             currentRateLimit = rateLimitPerMinute;
-            LOGGER.log(Level.INFO, "Gitea webhook server started on port {0}", port);
+            currentPath = path;
+            LOGGER.log(Level.INFO, "Gitea webhook server started on port {0} (path: {1})",
+                    new Object[] {port, path});
         } catch (Throwable t) {
             // We deliberately do NOT log the secret or bearer here.
             LOGGER.log(Level.SEVERE, "nativeStart failed for port " + port, t);
@@ -343,13 +354,14 @@ public class RustWebhookDispatcher {
         String hmacSecret,
         String bearerToken,
         String allowedCidrs,
-        int rateLimitPerMinute
+        int rateLimitPerMinute,
+        String pathPrefix
     );
 
     /**
      * Stop the native Rust webhook server. Idempotent.
      */
-    private static native void nativeStop();
+    public static native void nativeStop();
 
     /**
      * Register this class as the JNI callback target. Must be called from

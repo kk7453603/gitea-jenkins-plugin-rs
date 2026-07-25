@@ -89,14 +89,14 @@ public class RustWebhookDispatcherTest {
             // Trigger RustWebhookDispatcher.<clinit> which loads the native
             // library via NativeLibraryLoader. If this throws, every test is
             // skipped below.
-            RustWebhookDispatcher.configure(0, "", "", "", 60);
+            RustWebhookDispatcher.configure(0, "", "", "", 60, "/gitea-webhook");
             // Give the axum server a moment to bind. The native side returns
             // synchronously once the listener is up, but a small grace period
             // keeps the test stable on slow CI machines.
             Thread.sleep(100);
             // configure(-1, ...) is the canonical "stop" sentinel: nativeStop
             // is the only side-effect because running==true and port!=currentPort.
-            RustWebhookDispatcher.configure(-1, "", "", "", 60);
+            RustWebhookDispatcher.configure(-1, "", "", "", 60, "/gitea-webhook");
             nativeAvailable = true;
         } catch (Throwable t) {
             nativeAvailable = false;
@@ -141,13 +141,13 @@ public class RustWebhookDispatcherTest {
     public void configure_idempotent_onSameArgs() {
         Assume.assumeTrue("native lib not available — configure() test skipped", nativeAvailable);
         // Start fresh on an ephemeral port.
-        RustWebhookDispatcher.configure(0, "", "", "", 60);
+        RustWebhookDispatcher.configure(0, "", "", "", 60, "/gitea-webhook");
         boolean runningAfterFirst = RustWebhookDispatcher.isRunning();
         // Second call with identical args — must NOT bounce the listener.
-        RustWebhookDispatcher.configure(0, "", "", "", 60);
+        RustWebhookDispatcher.configure(0, "", "", "", 60, "/gitea-webhook");
         boolean runningAfterSecond = RustWebhookDispatcher.isRunning();
         // Tear down regardless of outcome so we leave no listener behind.
-        RustWebhookDispatcher.configure(-1, "", "", "", 60);
+        RustWebhookDispatcher.configure(-1, "", "", "", 60, "/gitea-webhook");
         org.junit.Assert.assertTrue(
             "dispatcher should be running after first configure()",
             runningAfterFirst

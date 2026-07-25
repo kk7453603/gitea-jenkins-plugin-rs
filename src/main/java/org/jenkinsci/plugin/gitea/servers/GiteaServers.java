@@ -142,6 +142,18 @@ public class GiteaServers extends GlobalConfiguration {
     private String webhookExternalUrl = "";
 
     /**
+     * Custom path prefix for the Rust webhook server routes. Default
+     * {@code "/gitea-webhook"} (back-compat with v1.0). Override when
+     * the corp reverse proxy routes webhook traffic via a different path
+     * (e.g. {@code "/jenkins/gitea-plugin"}) — the Rust side then exposes
+     * {@code /<prefix>/post}, {@code /<prefix>/health}, {@code /<prefix>/metrics}.
+     *
+     * <p>Leading/trailing slashes are normalised on the Rust side; pass
+     * any reasonable spelling.</p>
+     */
+    private String webhookPath = "/gitea-webhook";
+
+    /**
      * Additional CA certificates in PEM format. Appended on top of the
      * Mozilla CA bundle that the native Rust HTTP client trusts by default
      * — use this for self-signed Gitea instances or corporate CAs whose
@@ -398,7 +410,8 @@ public class GiteaServers extends GlobalConfiguration {
                     getWebhookSecret(),
                     getWebhookBearerToken(),
                     getWebhookAllowedCidrs(),
-                    getWebhookRateLimitPerMinute()
+                    getWebhookRateLimitPerMinute(),
+                    getWebhookPath()
             );
         } catch (Throwable t) {
             // The dispatcher itself logs the underlying native error; here we
@@ -687,6 +700,29 @@ public class GiteaServers extends GlobalConfiguration {
     @Restricted(NoExternalUse.class)
     public void setWebhookExternalUrl(String webhookExternalUrl) {
         this.webhookExternalUrl = webhookExternalUrl == null ? "" : webhookExternalUrl;
+    }
+
+    /**
+     * Custom webhook path prefix. Defaults to {@code "/gitea-webhook"}.
+     *
+     * @return the prefix (never {@code null}).
+     */
+    @Restricted(NoExternalUse.class)
+    public String getWebhookPath() {
+        return webhookPath == null || webhookPath.isEmpty() ? "/gitea-webhook" : webhookPath;
+    }
+
+    /**
+     * Set the custom webhook path prefix. Persisted via global config.
+     *
+     * @param webhookPath the prefix (e.g. {@code "/jenkins/gitea-plugin"});
+     *                    {@code null} or empty restores the default.
+     */
+    @Restricted(NoExternalUse.class)
+    public void setWebhookPath(String webhookPath) {
+        this.webhookPath = webhookPath == null || webhookPath.isEmpty()
+                ? "/gitea-webhook"
+                : webhookPath;
     }
 
     /**

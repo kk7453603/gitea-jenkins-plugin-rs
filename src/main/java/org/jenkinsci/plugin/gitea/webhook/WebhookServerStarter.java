@@ -88,7 +88,8 @@ public class WebhookServerStarter {
                     servers.getWebhookSecret(),
                     servers.getWebhookBearerToken(),
                     servers.getWebhookAllowedCidrs(),
-                    servers.getWebhookRateLimitPerMinute()
+                    servers.getWebhookRateLimitPerMinute(),
+                    servers.getWebhookPath()
             );
         } catch (Throwable t) {
             LOGGER.log(Level.SEVERE,

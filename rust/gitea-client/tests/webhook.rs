@@ -267,7 +267,7 @@ fn compute_sig(secret: &str, body: &[u8]) -> String {
 }
 
 async fn spawn_server(secret: Option<String>) -> WebhookServer {
-    WebhookServer::start(0, secret, None, vec![], 60)
+    WebhookServer::start(0, secret, None, vec![], 60, None)
         .await
         .expect("failed to bind test webhook server")
 }
