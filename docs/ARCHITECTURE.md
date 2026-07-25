@@ -556,23 +556,18 @@ The `GiteaServers` global config (UI: `Manage Jenkins → System → Gitea Serve
 %%{init: {'theme':'base', 'themeVariables': {'primaryTextColor':'#fff', 'primaryBorderColor':'#ccc', 'lineColor':'#aaa', 'background':'#1e1e1e', 'mainBkg':'#2a2a2a', 'secondBkg':'#3a3a3a', 'tertiaryBkg':'#444', 'edgeLabelBackground':'#2a2a2a', 'clusterBkg':'#2a2a2a', 'clusterBorder':'#888', 'actorBkg':'#2a4a6a', 'actorBorder':'#6af', 'actorTextColor':'#fff', 'actorLineColor':'#888', 'signalColor':'#fff', 'signalTextColor':'#fff', 'labelBoxBkgColor':'#2a2a2a', 'labelTextColor':'#fff', 'loopTextColor':'#fff', 'noteBorderColor':'#888', 'noteBkgColor':'#444', 'activationBorderColor':'#888', 'activationBkgColor':'#444', 'sequenceNumberColor':'#fff'}}}%%
 stateDiagram-v2
     [*] --> Unloaded
-    Unloaded --> Loading: First class init<br/>(RustGiteaConnection or<br/>RustWebhookDispatcher &lt;clinit&gt;)
+    Unloaded --> Loading: First class init\n(RustGiteaConnection or\nRustWebhookDispatcher clinit)
     Loading --> Loaded: NativeLibraryLoader.load() succeeds
-    Loading --> Failed: UnsatisfiedLinkError<br/>(.so missing or wrong arch)
+    Loading --> Failed: UnsatisfiedLinkError\n(.so missing or wrong arch)
 
-    Loaded --> DispatchersRegistered: nativeRegisterDispatcherClass<br/>+ nativeInstallLogBridge
+    Loaded --> DispatchersRegistered: nativeRegisterDispatcherClass\n+ nativeInstallLogBridge
     DispatchersRegistered --> ServerRunning: nativeStart (from WebhookServerStarter)
     ServerRunning --> ServerStopped: nativeStop (from GiteaPluginLifecycle.stop)
     ServerStopped --> ServerRunning: nativeStart (reconfigure via UI save)
 
-    Loaded --> Unloaded: NEVER<br/>(OnceLock cannot be reset;<br/>JVM exit is the only way)
+    note right of Loaded : LOADED Set is per-classloader.\nHot-reload creates a new classloader so\nthe new plugin instance reloads the .so\nfresh (separate temp file).
 
-    note right of Loaded
-        LOADED Set is per-classloader.
-        Hot-reload creates a new classloader,
-        so the new plugin instance reloads
-        the .so fresh (separate temp file).
-    end note
+    Loaded --> [*]: JVM exit\n(OnceLock cannot be reset)
 ```
 
 ---
