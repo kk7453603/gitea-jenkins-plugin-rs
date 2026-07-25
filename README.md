@@ -125,18 +125,29 @@ The Rust crate is a standalone project; you can develop, test, and benchmark it 
 
 | Aspect | Status |
 |---|---|
-| **Jenkins versions** | 2.479.3+ (unchanged from upstream) |
+| **Jenkins versions** | 2.479.3+ LTS, 2.504.x LTS, 2.528.x LTS (default), weekly. See [`docs/MIGRATION.md`](docs/MIGRATION.md) for rebuild instructions. |
 | **Plugin interactions** | 100% API-compatible — same POJOs, same Jelly UI, same SCM behaviour, same webhook contract |
-| **Operating systems** | Linux x86_64 only (production). macOS supported for development (`.dylib`). Windows / aarch64 not yet supported. |
+| **Operating systems** | Linux x86_64 + Linux aarch64 (both bundled in single `.hpi`). macOS arm64 supported for development (`.dylib`). Windows not yet supported. |
 | **Gitea API** | Same coverage as upstream `DefaultGiteaConnection`: 33 endpoints |
-| **Hot-reload** | Not supported. Restart Jenkins after installing or updating the plugin. |
+| **Hot-reload** | Supported since v1.3.0 via `GiteaPluginLifecycle.stop()` → `nativeStop()`. Tokio runtime cleanly torn down on plugin unload. A JVM shutdown hook also covers SIGKILL/SIGTERM cases. |
+| **HTTP proxy** | Supported since v1.0.0 via `GiteaServers.proxyUrl` + Jenkins global proxy fallback. Supports `http://`, `https://`, `socks5://`, `socks5h://`. |
+| **TLS / self-signed certs** | Supported since v1.0.0 via `trustedCertificatesPem` (corporate CA in PEM format). |
 
-## Limitations (MVP)
+## Limitations
 
-- **Jenkins HTTP proxy** — upstream `DefaultGiteaConnection` uses `Jenkins.get().proxy`; the Rust side does not yet read this setting. Tracked as TODO in `rust/gitea-client/src/client.rs`.
-- **Hot-reload** — the Tokio background runtime spawns worker threads that are not cleanly torn down on plugin unload. Restart Jenkins instead of hot-reloading the plugin.
-- **Cross-platform** — only Linux x86_64 is shipped in production builds. Adding macOS / Windows / aarch64 requires building a per-platform `.so` / `.dylib` / `.dll` and extending `NativeLibraryLoader` to select the right one based on `os.name` / `os.arch`.
-- **No fallback** — there is no Java-side `DefaultGiteaConnection` fallback. If the native library fails to load, the plugin will not function. This is a deliberate choice for the MVP.
+- **mTLS outbound** (Jenkins → Gitea client cert) — only server cert verification is supported via `trustedCertificatesPem`. Client cert for mutual TLS is a future enhancement.
+- **Windows Jenkins controllers** — only `linux/amd64` and `linux/aarch64` `.so` are bundled. macOS `.dylib` is built for dev only, no `.dll` for Windows.
+- **Webhook signature schemes other than HMAC-SHA256** — Gitea's default. RSA-SHA256 / Ed25519 not yet wired in.
+- **Cluster mode (HA Jenkins)** — Tokio runtime + HMAC secret are per-process. Multi-controller Jenkins needs shared state (Redis / DB) — not supported.
+- **Durable webhook retry queue** — relies on Gitea retry. If Gitea gives up after N attempts, the event is lost. In-memory LRU dedup (2048 entries) absorbs retries but does not survive Jenkins restart.
+- **Issue / PR comment events** — `issues` event type is accepted (200 OK) but ignored (no Jenkins-SCM semantic equivalent).
+- **No fallback** — there is no Java-side `DefaultGiteaConnection` fallback. If the native library fails to load, the plugin will not function. This is a deliberate choice.
+
+> **Note:** Jenkins HTTP proxy **and** hot-reload are now fully supported (v1.0.0 and v1.3.0 respectively):
+> - Proxy: `GiteaServers.proxyUrl` + Jenkins global proxy fallback (`buildProxyJson()`).
+> - Hot-reload: `GiteaPluginLifecycle.stop()` calls `nativeStop()` to tear down the Tokio runtime on plugin unload; a JVM shutdown hook covers SIGKILL/SIGTERM cases.
+>
+> See [`docs/ARCHITECTURE.md` §11](./docs/ARCHITECTURE.md#11-whats-not-in-scope-v1x) for the full out-of-scope list.
 
 ## Differences from upstream
 
