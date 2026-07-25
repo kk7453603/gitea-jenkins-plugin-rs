@@ -11,6 +11,7 @@ For installation/ops see [`PRODUCTION.md`](./PRODUCTION.md). For migration see [
 Who talks to what, at the highest level.
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'primaryTextColor':'#fff', 'primaryBorderColor':'#ccc', 'lineColor':'#aaa', 'background':'#1e1e1e', 'mainBkg':'#2a2a2a', 'secondBkg':'#3a3a3a', 'tertiaryBkg':'#444', 'edgeLabelBackground':'#2a2a2a', 'clusterBkg':'#2a2a2a', 'clusterBorder':'#888', 'actorBkg':'#2a4a6a', 'actorBorder':'#6af', 'actorTextColor':'#fff', 'actorLineColor':'#888', 'signalColor':'#fff', 'signalTextColor':'#fff', 'labelBoxBkgColor':'#2a2a2a', 'labelTextColor':'#fff', 'loopTextColor':'#fff', 'noteBorderColor':'#888', 'noteBkgColor':'#444', 'activationBorderColor':'#888', 'activationBkgColor':'#444', 'sequenceNumberColor':'#fff'}}}%%
 graph TB
     Developer["Developer<br/>pushes commits"]
     GiteaServer[("Gitea server<br/>git + REST API<br/>:443 / :3000")]
@@ -27,8 +28,8 @@ graph TB
     JenkinsController -->|"java.util.logging<br/>(tracing → JUL bridge)"| SIEM
     JenkinsController -->|"create commit status<br/>POST /api/v1/repos/.../statuses/{sha}"| GiteaServer
 
-    classDef external fill:#fdf,stroke:#939
-    classDef jenkins fill:#dfd,stroke:#393
+    classDef external fill:#5a2d5a,stroke:#c6f,color:#fff
+    classDef jenkins fill:#1f6f1f,stroke:#5f5,color:#fff
     class Developer,GiteaServer,Agent,PromScraper,SIEM external
     class JenkinsController jenkins
 ```
@@ -44,6 +45,7 @@ Both endpoints make outbound HTTPS calls to the Gitea REST API.
 ## 2. C4 Container — processes and binaries
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'primaryTextColor':'#fff', 'primaryBorderColor':'#ccc', 'lineColor':'#aaa', 'background':'#1e1e1e', 'mainBkg':'#2a2a2a', 'secondBkg':'#3a3a3a', 'tertiaryBkg':'#444', 'edgeLabelBackground':'#2a2a2a', 'clusterBkg':'#2a2a2a', 'clusterBorder':'#888', 'actorBkg':'#2a4a6a', 'actorBorder':'#6af', 'actorTextColor':'#fff', 'actorLineColor':'#888', 'signalColor':'#fff', 'signalTextColor':'#fff', 'labelBoxBkgColor':'#2a2a2a', 'labelTextColor':'#fff', 'loopTextColor':'#fff', 'noteBorderColor':'#888', 'noteBkgColor':'#444', 'activationBorderColor':'#888', 'activationBkgColor':'#444', 'sequenceNumberColor':'#fff'}}}%%
 graph TB
     subgraph JVM["Jenkins controller JVM (JDK 21)"]
         direction TB
@@ -73,8 +75,8 @@ graph TB
     TokioRT --> ReqwestPool
     ReqwestPool --> RustlsStore
 
-    classDef jvm fill:#dfd,stroke:#393
-    classDef native fill:#ffd,stroke:#993
+    classDef jvm fill:#1f6f1f,stroke:#5f5,color:#fff
+    classDef native fill:#7a5a00,stroke:#fc5,color:#fff
     class Plugin,JenkinsCore,OtherPlugins jvm
     class TokioRT,AxumServer,ReqwestPool,RustlsStore,PromRegistry native
 ```
@@ -91,6 +93,7 @@ graph TB
 ## 3. C4 Component — inside the plugin
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'primaryTextColor':'#fff', 'primaryBorderColor':'#ccc', 'lineColor':'#aaa', 'background':'#1e1e1e', 'mainBkg':'#2a2a2a', 'secondBkg':'#3a3a3a', 'tertiaryBkg':'#444', 'edgeLabelBackground':'#2a2a2a', 'clusterBkg':'#2a2a2a', 'clusterBorder':'#888', 'actorBkg':'#2a4a6a', 'actorBorder':'#6af', 'actorTextColor':'#fff', 'actorLineColor':'#888', 'signalColor':'#fff', 'signalTextColor':'#fff', 'labelBoxBkgColor':'#2a2a2a', 'labelTextColor':'#fff', 'loopTextColor':'#fff', 'noteBorderColor':'#888', 'noteBkgColor':'#444', 'activationBorderColor':'#888', 'activationBkgColor':'#444', 'sequenceNumberColor':'#fff'}}}%%
 graph LR
     subgraph JavaPlugin["Java side (gitea.hpi)"]
         direction TB
@@ -153,9 +156,9 @@ graph LR
     Runtime -.drives.-> Polling
     LogBridge -.forwards events.-> RustWebhookDispatcher
 
-    classDef java fill:#dfd,stroke:#393
-    classDef rust fill:#ffd,stroke:#993
-    classDef upstream fill:#eee,stroke:#666,stroke-dasharray: 5 5
+    classDef java fill:#1f6f1f,stroke:#5f5,color:#fff
+    classDef rust fill:#7a5a00,stroke:#fc5,color:#fff
+    classDef upstream fill:#3a3a3a,stroke:#888,stroke-dasharray: 5 5,color:#fff
     class RustGiteaConnectionFactory,RustGiteaConnection,RustWebhookDispatcher,WebhookServerStarter,GiteaPluginLifecycle,RustLogReceiver,NativeLibraryLoader,GiteaServersConfig,SPI java
     class JniExports,Server,Client,Pool,RateLimiter,Tls,Proxy,Polling,LogBridge,Events,Auth,Runtime rust
     class Untouched upstream
@@ -181,6 +184,7 @@ graph LR
 ### 4.1 Outbound — Jenkins fetches data from Gitea API
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'primaryTextColor':'#fff', 'primaryBorderColor':'#ccc', 'lineColor':'#aaa', 'background':'#1e1e1e', 'mainBkg':'#2a2a2a', 'secondBkg':'#3a3a3a', 'tertiaryBkg':'#444', 'edgeLabelBackground':'#2a2a2a', 'clusterBkg':'#2a2a2a', 'clusterBorder':'#888', 'actorBkg':'#2a4a6a', 'actorBorder':'#6af', 'actorTextColor':'#fff', 'actorLineColor':'#888', 'signalColor':'#fff', 'signalTextColor':'#fff', 'labelBoxBkgColor':'#2a2a2a', 'labelTextColor':'#fff', 'loopTextColor':'#fff', 'noteBorderColor':'#888', 'noteBkgColor':'#444', 'activationBorderColor':'#888', 'activationBkgColor':'#444', 'sequenceNumberColor':'#fff'}}}%%
 sequenceDiagram
     autonumber
     participant Job as Jenkins Job<br/>(Multibranch Pipeline)
@@ -233,6 +237,7 @@ sequenceDiagram
 ### 4.2 Inbound — Gitea sends a webhook
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'primaryTextColor':'#fff', 'primaryBorderColor':'#ccc', 'lineColor':'#aaa', 'background':'#1e1e1e', 'mainBkg':'#2a2a2a', 'secondBkg':'#3a3a3a', 'tertiaryBkg':'#444', 'edgeLabelBackground':'#2a2a2a', 'clusterBkg':'#2a2a2a', 'clusterBorder':'#888', 'actorBkg':'#2a4a6a', 'actorBorder':'#6af', 'actorTextColor':'#fff', 'actorLineColor':'#888', 'signalColor':'#fff', 'signalTextColor':'#fff', 'labelBoxBkgColor':'#2a2a2a', 'labelTextColor':'#fff', 'loopTextColor':'#fff', 'noteBorderColor':'#888', 'noteBkgColor':'#444', 'activationBorderColor':'#888', 'activationBkgColor':'#444', 'sequenceNumberColor':'#fff'}}}%%
 sequenceDiagram
     autonumber
     participant Gitea as Gitea server
@@ -314,6 +319,7 @@ sequenceDiagram
 ### 4.3 Plugin load + auto-start sequence
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'primaryTextColor':'#fff', 'primaryBorderColor':'#ccc', 'lineColor':'#aaa', 'background':'#1e1e1e', 'mainBkg':'#2a2a2a', 'secondBkg':'#3a3a3a', 'tertiaryBkg':'#444', 'edgeLabelBackground':'#2a2a2a', 'clusterBkg':'#2a2a2a', 'clusterBorder':'#888', 'actorBkg':'#2a4a6a', 'actorBorder':'#6af', 'actorTextColor':'#fff', 'actorLineColor':'#888', 'signalColor':'#fff', 'signalTextColor':'#fff', 'labelBoxBkgColor':'#2a2a2a', 'labelTextColor':'#fff', 'loopTextColor':'#fff', 'noteBorderColor':'#888', 'noteBkgColor':'#444', 'activationBorderColor':'#888', 'activationBkgColor':'#444', 'sequenceNumberColor':'#fff'}}}%%
 sequenceDiagram
     autonumber
     participant Jenkins as Jenkins core
@@ -360,6 +366,7 @@ sequenceDiagram
 ### 4.4 Hot-reload (Plugin.stop) sequence
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'primaryTextColor':'#fff', 'primaryBorderColor':'#ccc', 'lineColor':'#aaa', 'background':'#1e1e1e', 'mainBkg':'#2a2a2a', 'secondBkg':'#3a3a3a', 'tertiaryBkg':'#444', 'edgeLabelBackground':'#2a2a2a', 'clusterBkg':'#2a2a2a', 'clusterBorder':'#888', 'actorBkg':'#2a4a6a', 'actorBorder':'#6af', 'actorTextColor':'#fff', 'actorLineColor':'#888', 'signalColor':'#fff', 'signalTextColor':'#fff', 'labelBoxBkgColor':'#2a2a2a', 'labelTextColor':'#fff', 'loopTextColor':'#fff', 'noteBorderColor':'#888', 'noteBkgColor':'#444', 'activationBorderColor':'#888', 'activationBkgColor':'#444', 'sequenceNumberColor':'#fff'}}}%%
 sequenceDiagram
     autonumber
     participant Op as Operator
@@ -403,6 +410,7 @@ sequenceDiagram
 Each webhook `X-Gitea-Event` header value maps to a specific Java-side event class and Jenkins SCMEvent bus call:
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'primaryTextColor':'#fff', 'primaryBorderColor':'#ccc', 'lineColor':'#aaa', 'background':'#1e1e1e', 'mainBkg':'#2a2a2a', 'secondBkg':'#3a3a3a', 'tertiaryBkg':'#444', 'edgeLabelBackground':'#2a2a2a', 'clusterBkg':'#2a2a2a', 'clusterBorder':'#888', 'actorBkg':'#2a4a6a', 'actorBorder':'#6af', 'actorTextColor':'#fff', 'actorLineColor':'#888', 'signalColor':'#fff', 'signalTextColor':'#fff', 'labelBoxBkgColor':'#2a2a2a', 'labelTextColor':'#fff', 'loopTextColor':'#fff', 'noteBorderColor':'#888', 'noteBkgColor':'#444', 'activationBorderColor':'#888', 'activationBkgColor':'#444', 'sequenceNumberColor':'#fff'}}}%%
 graph LR
     subgraph GiteaEvents["Gitea X-Gitea-Event header"]
         Push["push"]
@@ -461,6 +469,7 @@ graph LR
 This is the exact order of checks the Rust axum handler runs for every `POST /gitea-webhook/post`. Reordering these changes security semantics — see comments.
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'primaryTextColor':'#fff', 'primaryBorderColor':'#ccc', 'lineColor':'#aaa', 'background':'#1e1e1e', 'mainBkg':'#2a2a2a', 'secondBkg':'#3a3a3a', 'tertiaryBkg':'#444', 'edgeLabelBackground':'#2a2a2a', 'clusterBkg':'#2a2a2a', 'clusterBorder':'#888', 'actorBkg':'#2a4a6a', 'actorBorder':'#6af', 'actorTextColor':'#fff', 'actorLineColor':'#888', 'signalColor':'#fff', 'signalTextColor':'#fff', 'labelBoxBkgColor':'#2a2a2a', 'labelTextColor':'#fff', 'loopTextColor':'#fff', 'noteBorderColor':'#888', 'noteBkgColor':'#444', 'activationBorderColor':'#888', 'activationBkgColor':'#444', 'sequenceNumberColor':'#fff'}}}%%
 graph TD
     Req["Incoming POST<br/>+ body + headers"]
     ConnInfo["axum ConnectInfo&lt;SocketAddr&gt;<br/>extracted via into_make_service_with_connect_info"]
@@ -544,6 +553,7 @@ The `GiteaServers` global config (UI: `Manage Jenkins → System → Gitea Serve
 ## 8. Native library lifecycle
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'primaryTextColor':'#fff', 'primaryBorderColor':'#ccc', 'lineColor':'#aaa', 'background':'#1e1e1e', 'mainBkg':'#2a2a2a', 'secondBkg':'#3a3a3a', 'tertiaryBkg':'#444', 'edgeLabelBackground':'#2a2a2a', 'clusterBkg':'#2a2a2a', 'clusterBorder':'#888', 'actorBkg':'#2a4a6a', 'actorBorder':'#6af', 'actorTextColor':'#fff', 'actorLineColor':'#888', 'signalColor':'#fff', 'signalTextColor':'#fff', 'labelBoxBkgColor':'#2a2a2a', 'labelTextColor':'#fff', 'loopTextColor':'#fff', 'noteBorderColor':'#888', 'noteBkgColor':'#444', 'activationBorderColor':'#888', 'activationBkgColor':'#444', 'sequenceNumberColor':'#fff'}}}%%
 stateDiagram-v2
     [*] --> Unloaded
     Unloaded --> Loading: First class init<br/>(RustGiteaConnection or<br/>RustWebhookDispatcher &lt;clinit&gt;)
