@@ -6,7 +6,7 @@
 
 A fork of [jenkinsci/gitea-plugin](https://github.com/jenkinsci/gitea-plugin) (upstream commit `ae31972`) with the Gitea HTTP client **and** webhook receiver rewritten in Rust for better performance, memory safety, and security isolation. The Java plugin architecture is preserved — only the `GiteaConnection` implementation is replaced. The plugin still produces a single `gitea.hpi` that drops into any Jenkins controller (Linux x86_64 or aarch64).
 
-**Jump to**: [Architecture](docs/ARCHITECTURE.md) · [Migration](docs/MIGRATION.md) · [Production guide](docs/PRODUCTION.md) · [Agent skills](agent-skills/) · [Changelog](CHANGES.md)
+**Jump to**: [Architecture](docs/ARCHITECTURE.md) · [Migration](docs/MIGRATION.md) · [Production guide](docs/PRODUCTION.md) · [Corporate migration](corporate-migration/) · [Agent skills](agent-skills/) · [Changelog](CHANGES.md)
 
 ---
 
@@ -159,6 +159,30 @@ The Rust crate is a standalone project; you can develop, test, and benchmark it 
 - **Changed:** `Jenkinsfile` adds a "Build Rust" stage on a Linux `amd64` agent
 
 All other ~100 Java classes are unchanged from upstream `ae31972`. The 41 Gitea POJOs, the Jelly UI, the SCM traits, and the webhook handlers are byte-for-byte identical to upstream.
+
+---
+
+## Corporate migration (for AI agents and ops)
+
+If you have a **corporate-customized** fork of `jenkinsci/gitea-plugin` (with custom headers, proxy modes, audit sinks, or auth schemes) and want to migrate to this Rust-accelerated version:
+
+➡️ **Read [`corporate-migration/AGENTS.md`](corporate-migration/AGENTS.md)** — operating manual for AI agents (pi, qwen, claude, etc.) tasked with the migration.
+
+The `corporate-migration/` directory contains:
+
+| File | Purpose |
+|---|---|
+| [`AGENTS.md`](corporate-migration/AGENTS.md) | Entry point for AI agents — constraints, DO-NOT-TOUCH list, workflow |
+| [`JNI-EXTENSIONS.md`](corporate-migration/JNI-EXTENSIONS.md) | How to add new Rust↔Java bridges safely |
+| [`HEADER-MIGRATION.md`](corporate-migration/HEADER-MIGRATION.md) | Porting custom header checks (inbound + outbound) |
+| [`PROXY-MIGRATION.md`](corporate-migration/PROXY-MIGRATION.md) | Porting corporate proxy configurations (7 patterns) |
+| [`CHECKLIST.md`](corporate-migration/CHECKLIST.md) | Step-by-step migration workflow (5 phases, 4-12 hours) |
+| [`examples/custom-header-injection.md`](corporate-migration/examples/custom-header-injection.md) | Template: add `X-Corp-Token` check (30 min) |
+| [`examples/multi-proxy.md`](corporate-migration/examples/multi-proxy.md) | Template: per-host proxy routing (2-3 hours) |
+| [`examples/custom-auth.md`](corporate-migration/examples/custom-auth.md) | Template: OAuth token refresh (4-6 hours) |
+| [`examples/audit-sink.md`](corporate-migration/examples/audit-sink.md) | Template: webhook → SIEM forwarding (1-2 hours) |
+
+**Key constraint:** the JNI integration (41 native methods in `RustGiteaConnection`, `jni.rs`, `runtime.rs`, `NativeLibraryLoader`) is load-bearing — DO NOT modify. Corporate customizations go in extension points (header pipeline, proxy module, new JNI bridges in `jni_corp.rs`).
 
 ## Webhook Configuration
 
