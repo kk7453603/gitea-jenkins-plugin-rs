@@ -1,58 +1,79 @@
 # Jenkins Gitea Plugin (Rust-accelerated)
 
-[![Version](https://img.shields.io/jenkins/plugin/v/gitea.svg?label=version)](https://plugins.jenkins.io/gitea)
-[![Changelog](https://img.shields.io/github/v/release/jenkinsci/gitea-plugin.svg?label=changelog)](https://github.com/jenkinsci/gitea-plugin/releases/latest)
-[![Installs](https://img.shields.io/jenkins/plugin/i/gitea.svg?color=blue)](https://plugins.jenkins.io/gitea)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/kk7453603/gitea-jenkins-plugin-rs/releases/tag/v1.3.0)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE.txt)
+[![Jenkins](https://img.shields.io/badge/Jenkins-LTS%202.479%2B-blue.svg)](https://www.jenkins.io/download/)
 
-This is a fork of [jenkinsci/gitea-plugin](https://github.com/jenkinsci/gitea-plugin) (upstream commit `ae31972`) with the Gitea HTTP client rewritten in Rust for better performance and memory safety. The Java plugin architecture is preserved — only the `GiteaConnection` implementation is replaced. The plugin still produces a single `gitea.hpi` that drops into any Jenkins controller.
+A fork of [jenkinsci/gitea-plugin](https://github.com/jenkinsci/gitea-plugin) (upstream commit `ae31972`) with the Gitea HTTP client **and** webhook receiver rewritten in Rust for better performance, memory safety, and security isolation. The Java plugin architecture is preserved — only the `GiteaConnection` implementation is replaced. The plugin still produces a single `gitea.hpi` that drops into any Jenkins controller (Linux x86_64 or aarch64).
 
-For details on the original plugin see [plugins.jenkins.io/gitea](https://plugins.jenkins.io/gitea).
+**Jump to**: [Architecture](docs/ARCHITECTURE.md) · [Migration](docs/MIGRATION.md) · [Production guide](docs/PRODUCTION.md) · [Agent skills](agent-skills/) · [Changelog](CHANGES.md)
 
-## Architecture
+---
 
-The plugin is built around the `org.jenkinsci.plugin.gitea.client.spi.GiteaConnectionFactory` ServiceLoader SPI. Upstream already uses this SPI to swap implementations (e.g. a mock factory in tests), which means the HTTP client can be replaced without touching any of the ~100 SCM, trait, event, webhook, or UI classes.
+## What's new (v1.3.0)
+
+| Feature | Where | What it does |
+|---|---|---|
+| **HTTP client rewritten in Rust** | `rust/gitea-client/` | 33 async Gitea API methods via reqwest + tokio |
+| **Webhook receiver in Rust** | `server.rs` (axum on `:8081`) | Separate port for HMAC-authenticated webhooks |
+| **HMAC-SHA256 + bearer + CIDR + rate limit** | `server.rs`, `rate_limiter.rs` | Defence-in-depth security pipeline |
+| **Idempotency (replay protection)** | LRU cache 2048 entries | Dedup by `X-Gitea-Delivery` header |
+| **TLS trust store** | `tls.rs`, UI field `trustedCertificatesPem` | Self-signed Gitea / corporate CA support |
+| **HTTP proxy** | `proxy.rs`, UI field `proxyUrl` + Jenkins proxy fallback | Corporate proxy compatibility |
+| **Custom webhook path** | UI field `webhookPath` | Reverse-proxy path override |
+| **External webhook URL** | UI field `webhookExternalUrl` | NAT / reverse-proxy URL override |
+| **Connection pool** | `pool.rs` (TTL+LRU, max 32) | TLS session reuse across requests |
+| **Polling scheduler** | `polling.rs` (ETag-based) | Fallback if webhooks fail |
+| **Prometheus metrics** | `GET :8081/metrics` | `gitea_webhook_requests_total{event_type,status}` + latency histogram |
+| **Health endpoint** | `GET :8081/health` | Kubernetes liveness probe target |
+| **Rust→JUL log bridge** | `log_bridge.rs`, `RustLogReceiver.java` | Rust `tracing` events visible in Jenkins System Log |
+| **Multi-arch .so** | `META-INF/native/linux/{amd64,aarch64}/` | Single `.hpi` works on x86_64 + Apple Silicon / Graviton |
+| **Hot-reload fix** | `GiteaPluginLifecycle.java` (`Plugin.stop()` → `nativeStop`) | Tokio threads cleaned up on plugin unload |
+| **Auto-start** | `@Initializer(after=EXTENSIONS_AUGMENTED)` | Webhook server starts on boot, no manual trigger |
+
+---
+
+## Architecture (TL;DR)
+
+For deep dive see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) with C4 + sequence diagrams + header processing pipeline.
 
 ```
-Jenkins Controller
-└── gitea.hpi  (single deployable artifact)
-    ├── ~100 Java classes (UNCHANGED from upstream)
-    │   └── SCM, traits, events, webhook handlers, 41 POJOs, Jelly templates
-    ├── RustGiteaConnection.java           (thin JNI bridge)
-    ├── RustGiteaConnectionFactory.java    (SPI implementation)
-    ├── NativeLibraryLoader.java           (unpacks + loads libgitea_rust.so)
-    ├── libgitea_rust.so                   (Rust cdylib, bundled)
-    └── META-INF/services/...GiteaConnectionFactory
-            → RustGiteaConnectionFactory
+Gitea server
+   │
+   │ POST :8081/gitea-webhook/post
+   │ + X-Gitea-Signature: HMAC-SHA256
+   │ + Authorization: Bearer <token>
+   ▼
+┌────────────────────────────────────────────────────────────────┐
+│ Jenkins Controller (JVM 21)                                    │
+│                                                                │
+│  :8080  Jenkins UI (Stapler / Jetty)                           │
+│  :8081  Rust webhook server (axum, separate port)              │
+│  :50000 Jenkins agent protocol                                 │
+│                                                                │
+│  libgitea_rust.so (~5 MB, 41 JNI symbols, multi-arch)          │
+│    ├── axum HTTP server + HMAC + rate limit + dedup            │
+│    ├── reqwest HTTP client + connection pool                   │
+│    ├── tokio runtime (1 per process)                           │
+│    ├── Prometheus / health endpoints                           │
+│    └── tracing → java.util.logging bridge                      │
+│                                                                │
+│  ~95 upstream Java classes UNTOUCHED (SCM, traits, POJOs, UI)  │
+│  ServiceLoader SPI → RustGiteaConnectionFactory                │
+└────────────────────────────────────────────────────────────────┘
+         ↑                                   ↑
+         │ outbound HTTPS                    │ outbound HTTPS
+         │ (token auth)                      │ (token auth)
+    Gitea API                            Gitea API
 ```
+
+The plugin uses the upstream `ServiceLoader SPI` (`GiteaConnectionFactory`)
+as the only integration point — ~95 Java classes from upstream stay
+byte-identical.
 
 The HTTP client logic (~1200 lines in upstream `DefaultGiteaConnection.java`) is replaced by a Rust crate at `rust/gitea-client/` that uses `reqwest` + `tokio`. Java calls into it via JNI; Rust returns raw JSON strings that Java deserializes through the existing Jackson `ObjectMapper`. The 41 Gitea POJOs are not duplicated on the Rust side.
 
-```
-┌────────────────────────────────────────────────────────────────┐
-│  GiteaSCMSource / GiteaWebhookListener / ...  (Java, unchanged)│
-└──────────────────────────────┬─────────────────────────────────┘
-                               │ uses
-                               ▼
-                interface GiteaConnection  (unchanged)
-                               ▲
-                               │ implements
-┌──────────────────────────────┴─────────────────────────────────┐
-│  RustGiteaConnection.java                                      │
-│   - 33 native methods (one per Gitea API operation)            │
-│   - static { NativeLibraryLoader.load("gitea_rust"); }         │
-│   - Jackson ObjectMapper to parse JSON returned from Rust      │
-└──────────────────────────────┬─────────────────────────────────┘
-                               │ JNI
-                               ▼
-┌────────────────────────────────────────────────────────────────┐
-│  libgitea_rust.so  (Rust cdylib)                               │
-│   - reqwest async client (Lazy static, connection pooled)      │
-│   - tokio Runtime (Lazy static)                                │
-│   - 33 #[no_mangle] extern "system" fn exports                 │
-│   - Auth: None / Token ("Authorization: token <T>") / Basic    │
-│   - Returns raw JSON as JString                                │
-└────────────────────────────────────────────────────────────────┘
-```
+**For the full component breakdown, sequence diagrams, C4 model, header processing pipeline, and hook type mapping, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).**
 
 ## Why Rust?
 

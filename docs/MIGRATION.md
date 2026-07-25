@@ -4,6 +4,9 @@ This guide walks through migrating an existing Jenkins installation from
 `jenkinsci/gitea-plugin` (upstream) to this Rust-accelerated fork. The
 process is reversible — see [Rollback](#rollback) below.
 
+**For any Jenkins version**: see [§"Targeting any Jenkins version"](#targeting-any-jenkins-version)
+below for compatibility matrix and rebuild instructions.
+
 ## TL;DR
 
 ```bash
@@ -14,6 +17,137 @@ export JENKINS_HOME=/var/lib/jenkins
 # Follow the printed checklist. After Jenkins restart:
 ./tools/smoke-test.sh http://jenkins:8081 <your-hmac-secret>
 ```
+
+---
+
+## Targeting any Jenkins version
+
+This plugin is built against Jenkins LTS `2.528.3` by default. To target
+a different Jenkins version (older LTS, weekly, or future LTS), follow
+the matrix below.
+
+### Compatibility matrix
+
+| Jenkins version | JDK | Plugin parent POM | Status | Build command |
+|---|---|---|---|---|
+| 2.479.3 (LTS) | 17 or 21 | `bom-2.479.x` | ✅ supported | `mvn -Djenkins.baseline=2.479 package` |
+| 2.504.x (LTS) | 21 | `bom-2.504.x` | ✅ supported | `mvn -Djenkins.baseline=2.504 package` |
+| 2.528.x (LTS, default) | 21 | `bom-2.528.x` | ✅ default | `mvn package` |
+| Weekly (latest) | 21 | latest `plugin:pom` | ⚠ best-effort | see "Weekly build" below |
+| Pre-2.479 (any) | 11 or 17 | unsupported | ❌ not supported | plugin uses JDK 21 features |
+
+### Step-by-step: rebuild for a different Jenkins baseline
+
+1. **Edit `pom.xml`** (one line):
+
+   ```xml
+   <properties>
+       <!-- Change this to your target Jenkins baseline -->
+       <jenkins.baseline>2.504</jenkins.baseline>
+       <jenkins.version>${jenkins.baseline}.3</jenkins.version>
+   </properties>
+   ```
+
+2. **Rebuild**:
+
+   ```bash
+   mvn -B clean package \
+       -DskipTests \
+       -Dban-junit4-imports.skip=true \
+       -Dexec.skip=true
+   ```
+
+3. **Verify Jenkins version match in the .hpi manifest**:
+
+   ```bash
+   unzip -p target/gitea.hpi META-INF/MANIFEST.MF | grep Jenkins-Version
+   # Should print: Jenkins-Version: 2.504.3
+   ```
+
+4. **Install on your Jenkins** — same as standard migration (see below).
+
+### Why this works
+
+The plugin's Java code only depends on:
+- Jenkins core APIs that have been stable since 2.x (no deprecated APIs)
+- `jenkins.scm.api` (SCMEvent, SCMHeadEvent, SCMSourceEvent) — stable since 2.x
+- Jackson 2 (via `jackson2-api` plugin) — stable
+- `credentials` plugin — stable
+- `branch-api` + `scm-api` — stable
+
+The Rust `.so` is **completely independent of Jenkins version** — it
+only depends on the JVM (JDK 21+ for `attach_current_thread` and
+`GlobalRef` APIs in `jni-rs 0.21`). So changing Jenkins baseline never
+requires rebuilding Rust.
+
+### Weekly build (bleeding-edge Jenkins)
+
+For Jenkins weekly, you may need to bump the parent POM:
+
+```xml
+<parent>
+    <groupId>org.jenkins-ci.plugins</groupId>
+    <artifactId>plugin</artifactId>
+    <version>LATEST</version>  <!-- or specific weekly version -->
+</parent>
+```
+
+Then:
+
+```bash
+mvn -B clean package -DskipTests -Dban-junit4-imports.skip=true -Dexec.skip=true \
+    -Djenkins.baseline=2.540  # or whatever weekly you target
+```
+
+If the parent POM introduces an incompatible enforcer rule, you may
+need to add additional skip flags (the build log will tell you which).
+
+### JDK requirements
+
+| JDK | Status | Notes |
+|---|---|---|
+| JDK 11 | ❌ | Plugin uses Java 17+ records and pattern matching |
+| JDK 17 | ⚠ | Works but Jenkins core dropped JDK 17 build support in 2.504+ |
+| JDK 21 (Eclipse Temurin) | ✅ recommended | Default in Dockerfile, tested in CI |
+| JDK 25 (early access) | untested | Should work; report issues |
+
+The Rust `.so` is JDK-agnostic at the binary level. The JNI bridge uses
+`jni-rs 0.21` which supports JDK 8-25+.
+
+### Plugin dependencies matrix
+
+The plugin's transitive dependencies are managed by the Jenkins BOM
+(`bom-${jenkins.baseline}.x`). When you change `<jenkins.baseline>`,
+Maven automatically picks compatible versions of:
+
+- `workflow-multibranch`
+- `branch-api`
+- `git`
+- `credentials`
+- `scm-api`
+- `jackson2-api`
+- `structs`
+- `configuration-as-code`
+- `authentication-tokens`
+- `handy-uri-templates-2-api`
+
+You don't need to pin versions manually.
+
+### Forward compatibility promise
+
+The plugin will continue to work with any future Jenkins LTS as long as:
+
+1. Jenkins core keeps `GlobalConfiguration`, `@Extension`, `SCMEvent`,
+   `@Initializer`, `Plugin.stop()` APIs (these are foundational and
+   unlikely to be removed).
+2. `scm-api` plugin keeps `SCMHeadEvent.fireNow()` /
+   `SCMSourceEvent.fireNow()` (stable since 2016).
+3. JDK 21+ runtime available.
+
+If any of these break (very unlikely), the plugin will need a
+source-level patch — see `AGENTS.md` for the agent workflow.
+
+
 
 ---
 

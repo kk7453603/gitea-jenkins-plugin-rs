@@ -12,6 +12,8 @@
 
 ## [Unreleased] — Rust JNI rewrite
 
+> This section combines the changes from the entire Rust rewrite (v1.0.0 → v1.3.0). For version-specific deltas see the per-version entries below.
+
 ### Breaking changes
 * Removed `DefaultGiteaConnection` and `DefaultGiteaConnectionFactory`.
 * Native library `libgitea_rust.so` is now required at runtime (bundled in the `.hpi` for Linux x86_64).
@@ -46,7 +48,114 @@
 
 ---
 
-## Version 1.2.1 (unreleased)
+## Version 1.3.0 (2026-07-25) — corporate integration ready
+
+### Added
+* **Custom webhook path** (`GiteaServers.webhookPath`) — operator can override the default `/gitea-webhook` prefix to accommodate corporate reverse-proxy routing (e.g. `/jenkins/gitea-plugin/`).
+* **Hot-reload fix** — new `GiteaPluginLifecycle` class extends `hudson.Plugin`, calls `nativeStop()` in `stop()` and registers a JVM shutdown hook for SIGKILL/SIGTERM cases. Fixes the v1.0/1.1 issue where tokio worker threads leaked after plugin reload.
+* **Migration tooling** — three new scripts in `tools/`:
+    * `migrate-from-upstream.sh` — backup `config.xml` + existing `.jpi`, build new `.hpi`, print operator checklist.
+    * `rollback-to-upstream.sh` — stop Jenkins, restore upstream `.jpi` + `config.xml`, remove pinned marker, restart.
+    * `smoke-test.sh` — five endpoint tests (health, metrics, 400 bad request, 401 wrong HMAC, 200 valid push).
+* **`docs/MIGRATION.md`** — comprehensive migration playbook with version compatibility matrix (Jenkins LTS 2.479 / 2.504 / 2.528 + weekly).
+* **`docs/ARCHITECTURE.md`** — canonical architecture reference with C4 model (context/container/component), 4 sequence diagrams (outbound API call, inbound webhook, plugin load, hot-reload), header processing pipeline, hook type → SCMEvent mapping.
+* **`nativeStop`** method on `RustWebhookDispatcher` made public so cross-package callers (`GiteaPluginLifecycle`) can invoke it.
+
+### Changed
+* `pom.xml` now declares `<plugin-class>org.jenkinsci.plugin.gitea.GiteaPluginLifecycle</plugin-class>` so Jenkins core instantiates the Plugin class and calls `start()`/`stop()` on lifecycle events.
+* `WebhookServerStarter` rewritten as `@Initializer(after=EXTENSIONS_AUGMENTED, before=JOB_LOADED)` instead of `AsyncPeriodicWork` with `Long.MAX_VALUE` recurrence — webhook server now starts deterministically on boot, no manual `configure()` needed.
+
+---
+
+## Version 1.2.0 (2026-07-24) — agent-friendly documentation
+
+### Added
+* **`AGENTS.md`** (489 lines) — comprehensive operating manual for AI agents adapting this plugin. 14 sections including: full architecture diagram, security threat model, 10 corporate customization points (CA, proxy, SSO, mTLS, RBAC, audit, secret rotation, URL obfuscation), 12-point corporate hardening checklist, "Known problems + fixes" lookup table (11 symptoms → root cause), agent workflow protocol.
+* **`agent-skills/`** catalog (26 `SKILL.md` files):
+    * `patterns/` (8): architectural patterns distilled from this project — `docker-rust-jenkins-multi-stage`, `jni-bridge-generator`, `json-over-jni-bridge`, `maven-cargo-integration`, `native-library-loader`, `parallel-multi-stage-orchestration`, `serviceloader-native-replacement`, `webhook-jni-callback-server`.
+    * `core/` (7): TDD, verification-loop, continuous-agent-loop, prompt-optimizer, coding-standards, agent-harness-construction, token-budget-advisor.
+    * `rust/` (2): rust-patterns, rust-testing.
+    * `jenkins/` (5): java-coding-standards, hexagonal-architecture, backend-patterns, docker-patterns, e2e-testing.
+    * `security/` (2): security-review, security-scan.
+    * `watchmen/` (2): curator brief + setup.
+* **`docs/PRODUCTION.md`** — ops playbook with nginx reverse-proxy config, firewall rules, backup strategy, Grafana alert PromQL, Kubernetes liveness probe YAML, troubleshooting matrix.
+
+---
+
+## Version 1.1.0 (2026-07-24) — production hardening
+
+### Added
+* **Connection pool** (`rust/gitea-client/src/pool.rs`) — `LazyLock<HashMap<key, PoolEntry>>` keyed by `(base_url, auth_hash)`. TTL eviction (5 min idle) + LRU overflow (max 32 entries). Auth secret is hashed, never logged in plaintext.
+* **Health endpoint** (`GET :8081/gitea-webhook/health`) — `200 {"status":"ok"}` without auth. Kubernetes liveness probe target.
+* **Prometheus metrics** (`GET :8081/gitea-webhook/metrics`) — `text/plain; version=0.0.4` exposition format.
+    * `gitea_webhook_requests_total{event_type,status}` counter with labels: `ok / bad_request / unauthorized / rate_limited / forbidden / duplicate / error`.
+    * `gitea_webhook_callback_latency_seconds{event_type}` histogram with buckets `[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]`.
+* **Idempotency dedup** (`DELIVERY_CACHE: LruCache<String, ()>` capacity 2048) — short-circuits duplicate `X-Gitea-Delivery` headers with `200 OK` without invoking the Java callback.
+* **Rust→JUL log bridge** — `log_bridge.rs` tracing subscriber layer that forwards INFO/WARN/ERROR events to `RustLogReceiver.handleLog(level, target, message)` via JNI. Maps to `Logger.getLogger("org.jenkinsci.plugin.gitea." + target)` so Rust logs appear in Jenkins System Log UI.
+* **Cross-platform native lib** — `META-INF/native/linux/{amd64,aarch64}/libgitea_rust.so` (both bundled in single `.hpi`). `NativeLibraryLoader` detects `os.arch` and tries the exact arch first, then falls back (e.g. aarch64 → amd64 via Rosetta).
+* **`webhookExternalUrl` field** — operator can override the synthesized URL registered with Gitea. Useful when Jenkins sits behind nginx/Cloudflare/AWS ALB and the internal hostname is not reachable from Gitea.
+* **lru** and **prometheus** crates added to `Cargo.toml`.
+
+### Changed
+* `server.rs` exposes `/gitea-webhook/health`, `/gitea-webhook/metrics`, and the existing `/post` endpoint.
+* `client.rs` uses `pool::acquire()` instead of allocating a fresh `reqwest::Client` per call.
+* `cleanup_loop` in `server.rs` now also evicts stale pool entries.
+
+---
+
+## Version 1.0.0 (2026-07-23) — production-ready MVP
+
+### Breaking changes
+* Removed `DefaultGiteaConnection` and `DefaultGiteaConnectionFactory` (~1200 lines).
+* Native library `libgitea_rust.so` is now required at runtime (bundled in the `.hpi` for Linux x86_64).
+* The plugin no longer supports hot-reload without restart.
+* **Webhook URL changed**: from `<jenkins>/gitea-webhook/post` (served by the Jenkins Stapler HTTP server) to `<jenkins>:<port>/gitea-webhook/post` where `<port>` defaults to `8081`. The webhook listener now runs inside `libgitea_rust.so` as a separate axum HTTP server. **Update your Gitea webhook configuration after upgrade** and ensure the new port is reachable from your Gitea instance.
+
+### Webhook layer
+* Removed `GiteaWebhookAction` (the Stapler HTTP endpoint on the Jenkins side).
+* Removed `GiteaWebhookHandler` (the Java payload parser).
+* Removed the `HandlerImpl` nested classes from the six event classes.
+* Added `RustWebhookDispatcher` (`@Extension`) — receives JNI callbacks from the Rust webhook server and re-fires the payloads on the Jenkins `SCMEvent` bus.
+* Added `WebhookServerStarter` (`@Extension`) — starts the Rust server after Jenkins finishes booting.
+* HMAC-SHA256 verification of the `X-Gitea-Signature` header (optional when secret is empty).
+* `tests/e2e/webhook_e2e.sh` — five-scenario end-to-end smoke test.
+* `RustWebhookDispatcherTest` — Java smoke test for `NativeLibraryLoader` double-load safety and `configure()` idempotency.
+
+### Rust HTTP client
+* 33 async Gitea API endpoints via `reqwest` + `tokio`.
+* 49 `wiremock`-based integration tests + 8 unit tests on the Rust side.
+* Process-wide lazy `Runtime` and pooled `Client`.
+
+### Java-side bridge
+* `RustGiteaConnection`, `RustGiteaConnectionFactory`, `NativeLibraryLoader` Java classes.
+* `META-INF/services/...GiteaConnectionFactory` points at `RustGiteaConnectionFactory`.
+
+### Stage 12 — TLS trust store
+* `tls.rs` / `tls_store.rs` — custom PEM CA bundle appended on top of Mozilla CA.
+* `GiteaServers.trustedCertificatesPem` field.
+* Resolves self-signed Gitea cert / corporate CA rejections.
+
+### Stage 13 — HTTP proxy
+* `proxy.rs` — outbound HTTP/HTTPS/SOCKS5 proxy via `reqwest::Proxy`.
+* `GiteaServers.{proxyUrl,proxyUsername,proxyPassword,noProxyHosts}` fields.
+* Jenkins global proxy fallback in `buildProxyJson()`.
+
+### Stage 10 — Polling scheduler
+* `polling.rs` — adaptive ETag-based polling loop as fallback for when webhooks fail.
+* Targets collected from `SCMSourceOwner → GiteaSCMSource` enumeration.
+
+### Stage 16 — Auth extensions
+* `rate_limiter.rs` — per-IP token bucket (configurable capacity, default 60/min).
+* IP CIDR allowlist via `cidr` crate.
+* Optional bearer token check.
+* Cleanup task evicts idle buckets every 5 min.
+
+### JNI bridge fix
+* `nativeRegisterDispatcherClass` exports a `GlobalRef` to `RustWebhookDispatcher` class. Tokio worker threads use this ref instead of `env.find_class(...)` (which uses the system ClassLoader and cannot see plugin classes).
+
+---
+
+
 
 * Fix the case where the SSH URI port was not specified ([JENKINS-61996](https://issues.jenkins-ci.org/browse/JENKINS-61996))
 * Propertly fetch tags ([JENKINS-61258](https://issues.jenkins-ci.org/browse/JENKINS-61258)) 
